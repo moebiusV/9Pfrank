@@ -41,7 +41,7 @@ Its session restoration uses an unauthenticated 8-byte session key in `Tsession`
 
 ## 3. Compatibility and connection startup
 
-1. Native 9Pfrank traffic establishes the configured authenticated transport **before** any 9P bytes, except in the debug mode. The server has three listeners. The TLS port expects a TLS ClientHello first and, after the handshake, runs step 2 detection, which selects `9Pfrank` or a TLS-wrapped legacy codec. The raw codec port carries plaintext, where step 2's byte-0 dispatch selects the 9P2000 family or 9P.original, and where native `9Pfrank` is accepted only when the debug knob is on. The 9front port runs dp9ik pre-auth then TLS-PSK and accepts only the 9P2000 codec.
+1. Native 9Pfrank traffic establishes the configured authenticated transport **before** any 9P bytes, except in the debug mode. The server has three listeners. The TLS port expects a TLS ClientHello first and, after the handshake, runs step 2 detection, which selects `9Pfrank` or a TLS-wrapped legacy codec. The raw codec port carries raw bytes, where step 2's byte-0 dispatch selects the 9P2000 family or 9P.original; native `9Pfrank` is accepted there on a listener bound to an authenticated tunnel or a local socket, and on an exposed raw listener only when the debug knob is on. The 9front port runs dp9ik pre-auth then TLS-PSK and accepts only the 9P2000 codec.
 2. Byte 0 selects the path first: `Tnop` or `Tsession` dispatches to the original-9P codec immediately. Otherwise read 13 bytes and require a self-consistent `Tversion` (type 100 at offset 4, `size` equal to 13 plus the version-string length); anything else is dropped. The checks do not collide: a `Tversion`'s byte 0 is the low byte of its size, which equals `Tnop` or `Tsession` only for version strings whose length is 37 or 71 modulo 256, lengths no accepted dialect uses. On the version path, the server matches the client's `version` string exactly to select a codec: `9P2000`, `9P2000.u`, `9P2000.L`, and `9P2000.e` select their legacy codecs; `9Pfrank` selects the native codec. Any other version string is handled per version(5): strip a `.suffix`, require `9P` followed by digits; if the digits are at least 2000, reply `9P2000`, otherwise reply `unknown`.
 3. A native client sends `version="9Pfrank"`, tag `0xffff`, and a proposed maximum message size. Any reply other than exactly `9Pfrank` means the server does not speak the native dialect, so in-place downgrade to 9P2000 is impossible; a native client that must fall back to a legacy dialect opens a fresh connection and sends that dialect's own version string.
 4. An exact `9Pfrank` reply switches both directions to the native header immediately after that reply. Then exchange HELLO; no attach or filesystem operation is legal before HELLO completes.
@@ -547,13 +547,14 @@ Estimate cost as measured CPU-seconds/GiB × projected volume plus peak required
 
 ### 9.5 Linux v9fs kernel client
 
-The in-kernel v9fs client speaks 9P2000, `.u`, and `.L` today. Making it a native 9Pfrank client is a separate, phased effort:
+The in-kernel v9fs client speaks 9P2000, `.u`, and `.L` today. Making it a native 9Pfrank client is post-freeze work, gated after the wire format is frozen (Phase B, ideally after Phase G interop); no native-kernel support is claimed beforehand (§11 item 6).
 
-1. Replace the 9P2000 wire codec with the 9Pfrank codec (20-byte header, native opcodes, fieldwise codecs).
+1. Add a 9Pfrank codec alongside the existing legacy codecs (20-byte header, native opcodes, fieldwise codecs).
 2. Map VFS operations onto native operations: compounds for lookup/open/read, and readdir-with-attributes with sparse attributes.
-3. Keep TLS out of the kernel. The mount connects over a local transport (Unix socket or loopback) to a userspace client that holds the TLS connection, or uses kTLS after a userspace handshake; the kernel speaks only 9Pfrank framing.
-4. Keep 9P2000, `.u`, and `.L` support; native 9Pfrank is added alongside, not a replacement.
-5. Gate: the kernel codec matches the userspace client byte-for-byte, and legacy 9P2000 mounts still pass their regression suite.
+3. Keep TLS out of the kernel. v9fs already takes a socket via `trans=fd` and `trans=unix`; a userspace helper does the TLS 1.3 handshake, installs kTLS, and passes the fd. Use the in-kernel handshake upcall (`net/handshake` with `tlshd`, added for NFS over TLS) rather than a bespoke helper. The local hop is a Unix socket with peer credentials, not loopback TCP, which would let any local user ride the mount owner's TLS identity. TLS 1.3 post-handshake records (KeyUpdate, NewSessionTicket) arrive as non-data and must be handled by userspace or the handshake daemon.
+4. Scope the first version to CORE plus COMPOUND. CANCEL maps onto v9fs's flush, with the new constraint that a client never sends CANCEL before its target; RECOVERY is a later phase, since the kernel must retain sequences and replay on reconnect, which v9fs does not do today.
+5. Kernel style overrides the no-`#define` rule; in-tree code follows kernel conventions, which use `#define` and `#ifdef` freely.
+6. Gate: the kernel codec matches the userspace client byte-for-byte, and legacy 9P2000 mounts still pass their regression suite.
 
 ## 10. Delivery plan
 
