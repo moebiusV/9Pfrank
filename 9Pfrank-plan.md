@@ -29,7 +29,7 @@ Recommended initial deployment: persistent TLS 1.3 over TCP, a userspace client 
 
 9P.original (editions 1 through 3) is a distinct pre-version wire format: no size prefix, a 2-byte tag per message, sessions open with `Tnop`/`Tsession`, names and stat records are fixed-size (28 and 116 bytes), and authentication is in-band p9sk1 with DES. Every message has a size fixed by its type apart from the count-bearing `Twrite` and `Rread`, so its codec delimits messages itself over any stream transport. The codec reports OVERFLOW for anything that does not fit its 32-bit qid paths (31 usable after the CHDIR bit), 28-byte names, and u32 stat times (which overflow in 2038), and it caps I/O at the fixed 8192-byte data limit, since there is no negotiated `msize`.
 
-p9sk1 is open to offline dictionary attack, so the default policy is to serve it only over an authenticated transport and let the transport identity, not p9sk1, authorize access. A server with no DES key declines the ticket exchange; whether a 1st-3rd edition client then proceeds unauthenticated (`none`) is to verify in Phase A. Registering a DES key with a Plan 9 auth server is a deployment prerequisite only if p9sk1 must actually be served. The old `Tattach` `uname[28]` is not trusted as-is; local policy maps it to an identity. The exact framing is pinned in Phase A.
+p9sk1 is open to offline dictionary attack. A server with no DES key declines the ticket exchange; whether a 1st-3rd edition client then proceeds unauthenticated (`none`) is to verify in Phase A. Registering a DES key with a Plan 9 auth server is a deployment prerequisite only if p9sk1 must actually be served. The old `Tattach` `uname[28]` is not trusted as-is; local policy maps it to an identity. The exact framing is pinned in Phase A.
 
 ### 2.1 The `.e` dialect
 
@@ -41,11 +41,11 @@ Its session restoration uses an unauthenticated 8-byte session key in `Tsession`
 
 ## 3. Compatibility and connection startup
 
-1. Native 9Pfrank traffic establishes the configured authenticated transport **before** any 9P bytes, except in the debug mode. The server has three listeners. The TLS port expects a TLS ClientHello first and, after the handshake, runs step 2 detection, which selects `9Pfrank` or a TLS-wrapped legacy codec. The raw codec port carries raw bytes, where step 2's byte-0 dispatch selects the 9P2000 family or 9P.original; native `9Pfrank` is accepted there on a listener bound to an authenticated tunnel or a local socket, and on an exposed raw listener only when the debug knob is on. The 9front port runs dp9ik pre-auth then TLS-PSK and accepts only the 9P2000 codec. Tunnel binding is a declared property of the listener configuration, validated where possible (for example, the bound address is a WireGuard interface); a mistake there is a misconfiguration, not a silent downgrade.
+1. The server has three listeners. The TLS port expects a TLS ClientHello first and, after the handshake, runs step 2 detection, which selects `9Pfrank` or a TLS-wrapped legacy codec. The plain TCP port carries raw bytes, where step 2's byte-0 dispatch selects any dialect, native `9Pfrank` included. The 9front port runs dp9ik pre-auth then TLS-PSK and accepts only the 9P2000 codec. The operator enables whichever listeners they want; tunnel binding is reported, not gated.
 2. Byte 0 selects the path first: `Tnop` or `Tsession` dispatches to the original-9P codec immediately. Otherwise read 13 bytes and require a self-consistent `Tversion` (type 100 at offset 4, `size` equal to 13 plus the version-string length); anything else is dropped. The checks do not collide: a `Tversion`'s byte 0 is the low byte of its size, which equals `Tnop` or `Tsession` only for version strings whose length is 37 or 71 modulo 256, lengths no accepted dialect uses. On the version path, the server matches the client's `version` string exactly to select a codec: `9P2000`, `9P2000.u`, `9P2000.L`, and `9P2000.e` select their legacy codecs; `9Pfrank` selects the native codec. Any other version string is handled per version(5): strip a `.suffix`, require `9P` followed by digits; if the digits are at least 2000, reply `9P2000`, otherwise reply `unknown`.
 3. A native client sends `version="9Pfrank"`, tag `0xffff`, and a proposed maximum message size. Any reply other than exactly `9Pfrank` means the server does not speak the native dialect, so in-place downgrade to 9P2000 is impossible; a native client that must fall back to a legacy dialect opens a fresh connection and sends that dialect's own version string.
 4. An exact `9Pfrank` reply switches both directions to the native header immediately after that reply. Then exchange HELLO; no attach or filesystem operation is legal before HELLO completes.
-5. By default, a 9Pfrank server accepts 9P2000, 9P2000.u, 9P2000.L, 9P2000.e, and 9P.original clients. Local policy may restrict the permitted set; a dialect outside it is disconnected. A compatibility retry uses a fresh connection and the exact selected legacy codec. A native client that falls back keeps its configured transport: fallback changes the dialect, not the transport, so a TLS or tunnel requirement still holds.
+5. By default, a 9Pfrank server accepts 9P2000, 9P2000.u, 9P2000.L, 9P2000.e, and 9P.original clients. Local policy may restrict the permitted set; a dialect outside it is disconnected. A compatibility retry uses a fresh connection and the exact selected legacy codec.
 6. There is one version exchange per transport connection. Mid-session reset requires a new connection; this removes a dangerous interaction between reset, active operations, and recovery.
 
 ```text
@@ -347,7 +347,7 @@ Unselected update fields are omitted, and mask bits for non-settable fields are 
 - **Locks:** action TEST=0, TRY=1, UNLOCK=2; kind READ=1, WRITE=2. Locks are advisory byte-range locks, owned by `(session, owner)`, not an untrusted PID or hostname. A failed TRY returns success with granted=0 and a conflict if disclosable. Ranges use checked addition; zero length means through future EOF. Splits/merges and read-to-write replacement are atomic. For UNLOCK, kind=0. No blocking lock queue in revision 1: clients back off and retry. Clunk does not implicitly release owner locks; clients explicitly unlock, and session expiry releases all. POSIX clients must translate close/fork/dup semantics into these owner operations; flock uses a distinct owner or an explicitly documented interoperability policy. Mandatory locking is unsupported.
 - **Cancellation:** disposition NOT_STARTED=0, FINISHED=1, MAY_HAVE_EFFECT=2, NOT_FOUND=3. A client MUST NOT send CANCEL before its target, including on resume, where retransmits precede cancels; the client controls transmit order and TCP preserves it. A CANCEL reply comes only after the target's terminal reply has been serialized. No later target response follows it. Cancelling a write does not roll it back. Cancellation of CANCEL is invalid; preserve reserved control capacity. The client keeps the target sequence outstanding until its terminal response or terminal connection failure.
 - **SPACE/COPY:** SPACE actions ALLOCATE_KEEP_SIZE=0, PUNCH_HOLE_KEEP_SIZE=1, SEEK_DATA=2, SEEK_HOLE=3; length=0 for seeks. Allocation and punching return offset=0. COPY flags=0 in revision 1; it may return partial progress. Reject overlapping same-object ranges. Neither operation implies snapshots or durable completion. Missing backend support is explicit; clients may choose their own fallback.
-- **Auth files:** AUTH creates a negotiated-method fid; READ/WRITE exchange method-defined bounded records. ATTACH uses authfid=0 for transport identity, or a completed auth fid otherwise. AUTHFILE methods must bind their result to this secure session/export; never accept credentials on an unencrypted network connection.
+- **Auth files:** AUTH creates a negotiated-method fid; READ/WRITE exchange method-defined bounded records. ATTACH uses authfid=0 for transport identity, or a completed auth fid otherwise. Over plain TCP there is no transport identity, so native 9Pfrank needs an AUTH method that works without TLS: trust the stated uname, as classic 9P2000 servers do, or run a PAKE such as dp9ik. AUTHFILE methods must bind their result to the session/export. Sending credentials over an unencrypted connection is a warned config choice, not a prohibition.
 
 Factotum is Plan 9's secret-custody agent: a per-user process that holds the user's keys, passwords, and certificates and performs authentication on behalf of other programs, none of which ever sees the secret material. It presents a file interface mounted at `/mnt/factotum` (`ctl`, `needkey`, `proto`, `log`); a program that must authenticate asks factotum to run the appropriate protocol, and factotum returns only the resulting proof. It reaches 9P through the auth-file flow: factotum opens the connection, issues `Tauth` with an auth fid, exchanges the protocol messages over that fid, and the authenticated fid is carried into `Tattach` by the requesting program. Factotum is therefore the client-side driver of a mechanism 9P already defines: the wire protocol owns the fid exchange, factotum owns the secret.
 
@@ -455,7 +455,7 @@ A strict-cache claim requires a complete lease state machine, model tests for ra
 
 ## 9. Secure network mounts with reasonable latency and cost
 
-Security is made easy and transparent, not forced. Secure transports are the default and need little configuration; the operator can see what is and is not encrypted; and plaintext is always a deliberate choice.
+Security is made easy and transparent, not forced. Nothing that worked before stops working, and the secure path wins because it is easier, not because the other path is locked. The operator can see what is and is not encrypted, so plaintext is always visible.
 
 ### 9.1 Transport choices
 
@@ -469,13 +469,15 @@ Security is made easy and transparent, not forced. Secure transports are the def
 
 TLS 1.3 provides authenticated encryption, modern key establishment, resumption, and key updates. Disable TLS early data for all 9P application traffic: replayed “reads” can consume synthetic streams, and mount/auth actions can create state. Verify server identity and use client certificates or an explicitly authenticated application method. The recommended TLS profile supports TLS_AES_128_GCM_SHA256 and TLS_CHACHA20_POLY1305_SHA256; prefer based on actual endpoint acceleration and measurement. Never design new ciphers or disable integrity for speed. [TLS 1.3, RFC 8446](https://www.rfc-editor.org/rfc/rfc8446)
 
+TLS is made the low-friction default: the server generates its identity at install, clients pin the key on first use or enroll with one command, and `tls://host` is as short to type as `tcp://host`.
+
 WireGuard uses a defined authenticated key exchange and ChaCha20-Poly1305. It is a useful option for legacy 9P traffic, but its peer key identifies a peer, not every account on that peer. Bind the server to its tunnel address, firewall alternate paths, and map peers to tightly scoped export identities or require additional per-user authentication. [WireGuard protocol](https://www.wireguard.com/protocol/)
 
 9front is accepted: the server offers the 9P2000 codec over dp9ik pre-auth plus TLS-PSK, which requires registration with a 9front auth server and its own port, because dp9ik sends plaintext before TLS while the native listener expects a TLS ClientHello first. The flow is `tlsclient -a` running `auth_proxy` with `proto=p9any` over the plain connection first, then TLS keyed with the resulting secret as a PSK. The TLS-1.3-only rule binds native 9Pfrank, not this codec, which speaks 9front's transport as it is. Three claims need verification: that 9front's libsec lacks TLS 1.3 client-certificate support, that it negotiates TLS 1.2 PSK rather than TLS 1.3, and that LibreSSL lacks the PSK cipher suites (the `openssl11` package name is from an old README and may be stale).
 
 Choose one encryption boundary deliberately. TLS inside WireGuard can be appropriate for end-to-end process authentication or different administrative boundaries, but adds processing and packet overhead. Benchmark that choice. A tunnel terminating on a gateway protects only as far as that gateway unless the backend leg is also secured.
 
-Plaintext is a debug mode for both 9Pfrank and the codecs, off by default and lab-only; the server enables it with its own knob, separate from the client's `allow_plaintext`. The TLS path never force-downgrades to it. Plaintext means a raw listener not bound to an authenticated tunnel interface or a local socket; a raw port on WireGuard or a Unix socket is not plaintext for this purpose. `9Pfrank` is a proposed ALPN identifier; check registration requirements before publication. Use configurable ports until service registration is settled.
+A `tls://` mount does not silently fall back to plaintext; a `tcp://` mount stays unrestricted. `9Pfrank` is a proposed ALPN identifier; check registration requirements before publication. Use configurable ports until service registration is settled.
 
 ### 9.2 Mount security policy
 
@@ -495,7 +497,7 @@ Proposed **future** mount configuration; this is a design example, not a command
 
 ```toml
 protocol = "9Pfrank"
-transport = "tls-tcp"
+transport = "tls"  # tls | tcp | unix
 server = "files.example.net:5640"  # deployment-chosen port, not a registration
 export = "projects"
 mountpoint = "/mnt/projects"
@@ -505,7 +507,6 @@ client_certificate = "/etc/9Pfrank/workstation.pem"
 client_key = "/etc/9Pfrank/workstation.key"
 identity = "alice@example.net"
 allow_legacy = false
-allow_plaintext = false  # debug only
 mount_options = ["nodev", "nosuid"]
 cache = "none"
 max_io = 262144
