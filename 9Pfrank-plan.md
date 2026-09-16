@@ -1,20 +1,20 @@
-# 9p2026: protocol design and implementation plan
+# 9Pfrank: protocol design and implementation plan
 
 Status: proposed design, revision 0.1, 2026-09-14. This is a design plan, not an existing standard or a claim of client support. All 2026 layouts, numbers, limits, and requirements below are proposed. `MUST` and `SHOULD` describe the intended contract. Freeze the wire format only after two independent implementations interoperate.
 
 ## 1. Direction
 
-Build a semantic superset of 9P2000, 9P2000.u, and 9P2000.L, including the session-recovery and compound-operation ideas associated with 9P2000.e. Preserve 9P's central model: attach to a namespace, obtain fids, walk names, read and write resources, and release references. Support synthetic files and services as first-class resources, not merely disk files.
+Build a semantic superset of 9P2000, 9P2000.u, 9P2000.L, and 9P2000.e. Preserve 9P's central model: attach to a namespace, obtain fids, walk names, read and write resources, and release references. Support synthetic files and services as first-class resources, not merely disk files.
 
-Use one new dialect, `9P2026`, with explicit capability negotiation. Preserve legacy dialects through separate frontends; do not reinterpret legacy packets according to newly invented rules. A superset of capabilities does not require a superset of incompatible byte layouts.
+Use one new dialect, `9Pfrank`, with explicit capability negotiation. The core implements a single unified operation set — the union of every dialect's operations — and each legacy dialect is a thin frontend that maps its own wire format onto that set. Because every frontend maps onto one unified set, supporting the earlier protocols is trivial. Wire formats stay per-dialect and are not reinterpreted; what is unified is the semantics, not the bytes.
 
-The full filesystem implementation should provide all applicable predecessor operations. Small synthetic servers may advertise a smaller profile. Unsupported backend features must produce explicit errors; they must never succeed without providing the promised behavior. “9P2026 core” and “9P2026 full filesystem” are distinct conformance claims.
+The full filesystem implementation should provide all applicable predecessor operations. Small synthetic servers may advertise a smaller profile. Unsupported backend features must produce explicit errors; they must never succeed without providing the promised behavior. “9Pfrank core” and “9Pfrank full filesystem” are distinct conformance claims.
 
-Recommended initial deployment: persistent TLS 1.3 over TCP, a userspace client and server, bounded pipelining, compound metadata operations, and conservative caching. Add reconnect recovery and coherent caching only after correctness and measurements justify them. WireGuard is an excellent deployment option where an encrypted host network already exists. The reference implementation is written in C99 — the highest standard the OpenBSD kernel compiles — so it builds across all major open-source distributions.
+Recommended initial deployment: persistent TLS 1.3 over TCP, a userspace client and server, bounded pipelining, compound metadata operations, and conservative caching. Add reconnect recovery and coherent caching only after correctness and measurements justify them. WireGuard is an excellent deployment option where an encrypted host network already exists. The reference implementation is written in C99 — the highest standard the OpenBSD kernel compiles — so it builds across all major open-source distributions. The library uses a no-macro style: `#define` is permitted only for header guards; all constants are `const` or `enum`. It exposes a stable C ABI — a single public C99 header, using the standard `#ifdef __cplusplus`/`extern "C"` guard so C++ consumers link with C linkage — as the FFI surface.
 
 ## 2. What is being unified
 
-| Heritage | Keep | Change in 9p2026 |
+| Heritage | Keep | Change in 9Pfrank |
 | --- | --- | --- |
 | 9P2000 | Namespaces, fids, tag multiplexing, walk, auth files, synthetic resources, flush | Larger tags and fids; explicit lifetimes, bounds, ordering, and cancellation outcomes |
 | 9P2000.u | Unix object kinds, ownership, special mode bits, human-readable errors | Typed metadata rather than overloaded extension strings; identity domains rather than implicit global UID agreement |
@@ -26,18 +26,18 @@ Recommended initial deployment: persistent TLS 1.3 over TCP, a userspace client 
 
 9P2000.L supplies the filesystem-oriented operations above and uses Linux-specific error conventions. Preserve their functionality while defining the new dialect independently of a host ABI. [diod protocol documentation](https://github.com/chaos/diod/blob/master/protocol.md)
 
-### 2.1 The `.e` ambiguity must be resolved explicitly
+### 2.1 The `.e` dialect
 
-The qp package describes `9P2000.e` as session restoration plus shortcuts combining walk, open, read/write, and clunk. LING uses the same name for Erlang internode communication and describes different authentication and message-handling requirements. These sources do not establish a single interoperable `.e` standard. [qp package documentation](https://pkg.go.dev/github.com/csdksoftware/qp), [LING implementation documentation](https://github.com/cloudozer/ling/blob/master/doc/9p.md)
+9P2000.e adds session restoration and compound ("macro") operations on top of 9P2000. It originated with Erlang-on-Xen (Cloudozer's Ling VM; Maxim Kharchenko's 2012 specification), and the qp Go library implements the same dialect. [qp package documentation](https://pkg.go.dev/github.com/csdksoftware/qp), [LING implementation documentation](https://github.com/cloudozer/ling/blob/master/doc/9p.md)
 
-The implementation plan therefore includes an inventory of `.e` implementations, pinned source revisions, packet captures, and golden fixtures before any `.e` compatibility claim. Preserve the recovery and shortcut capabilities in the native protocol. Treat LING-specific authentication and Erlang messages as a separately named adapter/service module, with bounded payloads and no unsafe runtime-term deserialization. Do not transplant historical authentication simply because it used the same dialect string. Exact historical `.e` opcodes remain a research deliverable, not invented facts in this proposal.
+9Pfrank preserves these capabilities natively: session resumption, bounded duplicate suppression, and ordered compounds. LING's Erlang-specific authentication and internode messaging are a separate concern, handled by a separately named adapter module rather than the `.e` wire protocol.
 
 ## 3. Compatibility and connection startup
 
 1. Establish the configured authenticated transport **before** sending any 9P bytes. There is no plaintext STARTTLS phase.
-2. Send the existing version-exchange framing shown below, with `version="9P2026"`, tag `0xffff`, and a proposed maximum message size.
-3. An exact `9P2026` reply switches both directions to the 2026 header immediately after that reply. Then exchange HELLO; no attach or filesystem operation is legal before HELLO completes.
-4. A legacy response is accepted only if local policy explicitly permits that dialect. Otherwise disconnect. A compatibility retry uses a fresh connection and the exact selected legacy codec. Security requirements never weaken during fallback.
+2. Send the existing version-exchange framing shown below, with `version="9Pfrank"`, tag `0xffff`, and a proposed maximum message size.
+3. An exact `9Pfrank` reply switches both directions to the 2026 header immediately after that reply. Then exchange HELLO; no attach or filesystem operation is legal before HELLO completes.
+4. By default, a 9Pfrank server accepts connections from 9P2000, 9P2000.u, 9P2000.L, 9P2000.e, and original 9P clients. Local policy may restrict the permitted set; a dialect outside it is disconnected. A compatibility retry uses a fresh connection and the exact selected legacy codec. Security requirements never weaken during fallback.
 5. There is one version exchange per transport connection. Mid-session reset requires a new connection; this removes a dangerous interaction between reset, active operations, and recovery.
 
 ```text
@@ -342,7 +342,7 @@ Unselected update fields must use zero/empty encodings. A conditional SETATTR co
 
 Factotum is Plan 9's secret-custody agent: a per-user process that holds the user's keys, passwords, and certificates and performs authentication on behalf of other programs, none of which ever sees the secret material. It presents a file interface mounted at `/mnt/factotum` (`ctl`, `needkey`, `proto`, `log`); a program that must authenticate asks factotum to run the appropriate protocol, and factotum returns only the resulting proof. It reaches 9P through the auth-file flow: factotum opens the connection, issues `Tauth` with an auth fid, exchanges the protocol messages over that fid, and the authenticated fid is carried into `Tattach` by the requesting program. Factotum is therefore the client-side driver of a mechanism 9P already defines — the wire protocol owns the fid exchange, factotum owns the secret.
 
-9p2026 keeps that mechanism (`AUTH`/`ATTACH`/`authfid`) method-agnostic — `method:text` and method-defined bounded records — so a factotum-like agent drives it unchanged. On modern multi-user Unix the same custody role is filled by ssh-agent, gpg-agent, Kerberos credential caches, and OS keyrings; these differ from factotum in interface (a socket or D-Bus endpoint rather than a 9P-mounted file tree) but not in function, and any of them can drive the AUTH fid on the client's behalf. The transport default, `authfid=0`, is the TLS 1.3 client certificate (§9.1); `AUTHFILE` is the hook for methods a certificate cannot carry. Factotum-style secret custody is thus a client-side deployment component, not a wire-protocol feature: 9p2026 specifies the fid-based auth exchange, not the local agent that performs it.
+9Pfrank keeps that mechanism (`AUTH`/`ATTACH`/`authfid`) method-agnostic — `method:text` and method-defined bounded records — so a factotum-like agent drives it unchanged. On modern multi-user Unix the same custody role is filled by ssh-agent, gpg-agent, Kerberos credential caches, and OS keyrings; these differ from factotum in interface (a socket or D-Bus endpoint rather than a 9P-mounted file tree) but not in function, and any of them can drive the AUTH fid on the client's behalf. The transport default, `authfid=0`, is the TLS 1.3 client certificate (§9.1); `AUTHFILE` is the hook for methods a certificate cannot carry. Factotum-style secret custody is thus a client-side deployment component, not a wire-protocol feature: 9Pfrank specifies the fid-based auth exchange, not the local agent that performs it.
 
 The client ships optional shims — support code that translates an existing source's interface into a bounded `AUTH` method — which drive the auth fid. Shims occupy two client-side slots and one server-side slot:
 
@@ -365,7 +365,7 @@ The client ships optional shims — support code that translates an existing sou
 
 **Server-side verifiers**: each shimmed method is verified by its native backend (authorized_keys, a KDC, an IdP token endpoint, or a TOTP verifier), and **PAM** is shimmed as a general verifier behind an export.
 
-The number of factors is a property of the method, not the protocol: a method may chain several challenges (a certificate, a password, a TOTP code) inside its own bounded record exchange, and 9p2026 treats the result as a single authenticated fid.
+The number of factors is a property of the method, not the protocol: a method may chain several challenges (a certificate, a password, a TOTP code) inside its own bounded record exchange, and 9Pfrank treats the result as a single authenticated fid.
 
 Each shim is optional, advertises only the capabilities it supports, and reports unsupported operations explicitly (§1). The transport certificate path (`authfid=0`, §9.1) needs no shim.
 
@@ -461,7 +461,7 @@ WireGuard uses a defined authenticated key exchange and ChaCha20-Poly1305. It is
 
 Choose one encryption boundary deliberately. TLS inside WireGuard can be appropriate for end-to-end process authentication or different administrative boundaries, but adds processing and packet overhead. Benchmark that choice. A tunnel terminating on a gateway protects only as far as that gateway unless the backend leg is also secured.
 
-Never downgrade to plaintext. `9p2026` is a proposed ALPN identifier; check registration requirements before publication. Use configurable ports until service registration is settled.
+Never downgrade to plaintext. `9Pfrank` is a proposed ALPN identifier; check registration requirements before publication. Use configurable ports until service registration is settled.
 
 ### 9.2 Mount security policy
 
@@ -474,20 +474,20 @@ Never downgrade to plaintext. `9p2026` is a proposed ALPN identifier; check regi
 - Bound reconnect attempts and request deadlines. A timeout is not proof of failure. Make uncertain writes visible; do not silently make a failed shared mount writable offline.
 - Use scoped certificates/keys, handshake rate limits, per-principal quotas, and useful audit records. Log identity, export, operation class, latency, and outcome; redact secrets and avoid routine file-content logging.
 
-Linux's documented 9P mount options currently list 9P2000, `.u`, and `.L`; they do not establish support for this proposed dialect or a native TLS transport. New kernel support or a userspace filesystem client is required for 9P2026. [Linux 9P documentation](https://docs.kernel.org/filesystems/9p.html)
+Linux's documented 9P mount options currently list 9P2000, `.u`, and `.L`; they do not establish support for this proposed dialect or a native TLS transport. New kernel support or a userspace filesystem client is required for 9Pfrank. [Linux 9P documentation](https://docs.kernel.org/filesystems/9p.html)
 
 Proposed **future** mount configuration; this is a design example, not a command supported by current mount utilities:
 
 ```toml
-protocol = "9P2026"
+protocol = "9Pfrank"
 transport = "tls-tcp"
 server = "files.example.net:5640"  # deployment-chosen port, not a registration
 export = "projects"
 mountpoint = "/mnt/projects"
 verify_name = "files.example.net"
-ca_file = "/etc/9p2026/ca.pem"
-client_certificate = "/etc/9p2026/workstation.pem"
-client_key = "/etc/9p2026/workstation.key"
+ca_file = "/etc/9Pfrank/ca.pem"
+client_certificate = "/etc/9Pfrank/workstation.pem"
+client_key = "/etc/9Pfrank/workstation.key"
 identity = "alice@example.net"
 allow_legacy = false
 allow_plaintext = false
@@ -549,7 +549,7 @@ Gate: two independent codecs agree byte-for-byte, malformed inputs remain within
 
 ### Phase C — useful secure prototype
 
-Implement a userspace server and mount client with CORE, POSIX, TLS/TCP, and a local Unix-socket transport. Add legacy `.L` and `.u` frontends to the same backend API without merging codecs. Use explicit identity mapping and export confinement. Default to uncached operation. Add synthetic echo/control/event resources alongside ordinary files.
+Implement a userspace server and mount client with CORE, POSIX, TLS/TCP, and a local Unix-socket transport. Add legacy `.L` and `.u` frontends to the same backend API without merging codecs. Use explicit identity mapping and export confinement. Default to uncached operation. Add synthetic echo/control/event resources alongside ordinary files. Ship a working skeleton passthrough client and server — the pair the cookbook's examples run against — with a fun example server that serves every file reversed. Provide the server as a reusable library, with a cookbook documenting how to adapt it into a frontend to anything.
 
 Gate: mount/read/write/create/link/rename/unlink, cross-user denial, symlink escape resistance, special-file policy, explicit durability, and cancellation work under concurrency. Publish the actual supported OS/client combinations and installation recipes.
 
@@ -573,7 +573,24 @@ Gate: either demonstrate the cache benefit with correctness evidence, or keep th
 
 ### Phase G — interoperability and release
 
-Run two independent client/server combinations, legacy regression suites, property/fuzz tests, and network/crash fault injection. Publish packet diagrams, a dissector, threat model, compatibility matrix, benchmark scripts/results, and administrator documentation. Obtain opcode/feature/ALPN/service registration where applicable. Freeze revision 1 only after review of recovery and authorization by people outside the implementation team.
+Run two independent client/server combinations, legacy regression suites, property/fuzz tests, and network/crash fault injection. Publish packet diagrams, a dissector, threat model, compatibility matrix, benchmark scripts/results, and administrator documentation. Ship the spec; a cookbook of fun, worked examples on Linux, OpenBSD, and Windows; the client and server; complete FFI shims (one `bindings/` subdirectory per language, a binding matrix, and an FFI docs page with the API reference table, C quick start, architecture diagram, and build instructions); and full documentation — manpages, GNU info, markdown, `README.distributions` with `dist/` packaging templates, an `UNBOXING` quick start, and a `CHANGES` log — in a full GNU autotools layout following GNU standards. Obtain opcode/feature/ALPN/service registration where applicable. Freeze revision 1 only after review of recovery and authorization by people outside the implementation team.
+
+### Cookbook — worked example projects
+
+The cookbook ships these ten projects in ascending difficulty, each small enough for a junior coder and each adding one new idea on top of the last:
+
+1. **Hello, 9Pfrank** — mount one synthetic `/hello` file that reads a fixed string.
+2. **The Clock** — `/time` and `/uptime`, computed on every read; nothing is stored.
+3. **Backwards File System** — a passthrough that serves a directory with every file's bytes reversed.
+4. **Fortune Cookie** — `/fortune` returns a random line from a quote file on each open.
+5. **System Dashboard** — a `/proc`-style mount exposing memory, load, and CPU as synthetic files.
+6. **TODO Directory** — one file per todo item; create/remove/write to manage the list.
+7. **Guestbook** — write a file to post a timestamped message; read `/log` to view them.
+8. **Remote Clipboard** — `/clipboard` as a read/write file mirroring the host clipboard.
+9. **Magic Calculator** — write an expression to `/calc` and read the answer, or a `/primes/<n>` tree.
+10. **SQLite/API as a Filesystem** — a database table or a REST endpoint served as a directory of files.
+
+These ten projects are the `examples/` directory; each ships in C against the library and in idiomatic newLISP through the newLISP FFI binding.
 
 ## 11. Decisions deliberately left for review
 
