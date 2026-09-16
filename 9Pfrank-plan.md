@@ -41,7 +41,7 @@ Its session restoration uses an unauthenticated 8-byte session key in `Tsession`
 
 ## 3. Compatibility and connection startup
 
-1. Native 9Pfrank traffic establishes the configured authenticated transport **before** any 9P bytes, except in the debug mode. The server has three listeners. The TLS port expects a TLS ClientHello first and, after the handshake, runs step 2 detection, which selects `9Pfrank` or a TLS-wrapped legacy codec. The raw codec port carries raw bytes, where step 2's byte-0 dispatch selects the 9P2000 family or 9P.original; native `9Pfrank` is accepted there on a listener bound to an authenticated tunnel or a local socket, and on an exposed raw listener only when the debug knob is on. The 9front port runs dp9ik pre-auth then TLS-PSK and accepts only the 9P2000 codec.
+1. Native 9Pfrank traffic establishes the configured authenticated transport **before** any 9P bytes, except in the debug mode. The server has three listeners. The TLS port expects a TLS ClientHello first and, after the handshake, runs step 2 detection, which selects `9Pfrank` or a TLS-wrapped legacy codec. The raw codec port carries raw bytes, where step 2's byte-0 dispatch selects the 9P2000 family or 9P.original; native `9Pfrank` is accepted there on a listener bound to an authenticated tunnel or a local socket, and on an exposed raw listener only when the debug knob is on. The 9front port runs dp9ik pre-auth then TLS-PSK and accepts only the 9P2000 codec. Tunnel binding is a declared property of the listener configuration, validated where possible (for example, the bound address is a WireGuard interface); a mistake there is a misconfiguration, not a silent downgrade.
 2. Byte 0 selects the path first: `Tnop` or `Tsession` dispatches to the original-9P codec immediately. Otherwise read 13 bytes and require a self-consistent `Tversion` (type 100 at offset 4, `size` equal to 13 plus the version-string length); anything else is dropped. The checks do not collide: a `Tversion`'s byte 0 is the low byte of its size, which equals `Tnop` or `Tsession` only for version strings whose length is 37 or 71 modulo 256, lengths no accepted dialect uses. On the version path, the server matches the client's `version` string exactly to select a codec: `9P2000`, `9P2000.u`, `9P2000.L`, and `9P2000.e` select their legacy codecs; `9Pfrank` selects the native codec. Any other version string is handled per version(5): strip a `.suffix`, require `9P` followed by digits; if the digits are at least 2000, reply `9P2000`, otherwise reply `unknown`.
 3. A native client sends `version="9Pfrank"`, tag `0xffff`, and a proposed maximum message size. Any reply other than exactly `9Pfrank` means the server does not speak the native dialect, so in-place downgrade to 9P2000 is impossible; a native client that must fall back to a legacy dialect opens a fresh connection and sends that dialect's own version string.
 4. An exact `9Pfrank` reply switches both directions to the native header immediately after that reply. Then exchange HELLO; no attach or filesystem operation is legal before HELLO completes.
@@ -455,7 +455,7 @@ A strict-cache claim requires a complete lease state machine, model tests for ra
 
 ## 9. Secure network mounts with reasonable latency and cost
 
-Security is made easy and transparent, not forced. Secure transports are the default and need little configuration; the operator can see what is and is not encrypted; and plaintext or a legacy dialect is always a deliberate choice.
+Security is made easy and transparent, not forced. Secure transports are the default and need little configuration; the operator can see what is and is not encrypted; and plaintext is always a deliberate choice.
 
 ### 9.1 Transport choices
 
@@ -487,6 +487,7 @@ Plaintext is a debug mode for both 9Pfrank and the codecs, off by default and la
 - Enforce authorization on the server even if a client kernel also checks permissions. Treat metadata, filenames, errors, and application bytes from the server as untrusted parser input.
 - Bound reconnect attempts and request deadlines. A timeout is not proof of failure. Make uncertain writes visible; do not silently make a failed shared mount writable offline.
 - Use scoped certificates/keys, handshake rate limits, per-principal quotas, and useful audit records. Log identity, export, operation class, latency, and outcome; redact secrets and avoid routine file-content logging.
+- Report each session's dialect, transport, and peer identity, so the operator can see what is and is not encrypted: a stats or ctl file, a log line at attach, and client-side mount output.
 
 Linux's documented 9P mount options currently list 9P2000, `.u`, and `.L`; they do not establish support for this proposed dialect or a native TLS transport. New kernel support or a userspace filesystem client is required for 9Pfrank. [Linux 9P documentation](https://docs.kernel.org/filesystems/9p.html)
 
@@ -553,7 +554,7 @@ The in-kernel v9fs client speaks 9P2000, `.u`, and `.L` today. Making it a nativ
 
 1. Add a 9Pfrank codec alongside the existing legacy codecs (20-byte header, native opcodes, fieldwise codecs).
 2. Map VFS operations onto native operations: compounds for lookup/open/read, and readdir-with-attributes with sparse attributes.
-3. Keep TLS out of the kernel. v9fs already takes a socket via `trans=fd` and `trans=unix`; a userspace helper does the TLS 1.3 handshake, installs kTLS, and passes the fd. Use the in-kernel handshake upcall (`net/handshake` with `tlshd`, added for NFS over TLS) rather than a bespoke helper. The local hop is a Unix socket with peer credentials, not loopback TCP, which would let any local user ride the mount owner's TLS identity. TLS 1.3 post-handshake records (KeyUpdate, NewSessionTicket) arrive as non-data and must be handled by userspace or the handshake daemon.
+3. Keep the TLS handshake out of the kernel. Three designs, in order of preference: the upcall, where the kernel owns the TCP socket and asks `tlshd` (`net/handshake`) to handshake it in place, with no fd passing; `trans=fd` with kTLS, where a userspace helper handshakes, installs kTLS, and passes the fd; and a Unix-socket proxy, where a userspace client holds the TLS connection and the kernel talks to it over a Unix socket. The proxy is the only variant with a local hop, so the peer-credentials-over-loopback rule applies only there. Under the upcall the kernel reads the record type and handles TLS 1.3 post-handshake control records (KeyUpdate, NewSessionTicket) in-kernel, as SunRPC's TLS transport does, since `tlshd` exits after the handshake; check kTLS's KeyUpdate support before relying on long-lived mounts.
 4. Scope the first version to CORE plus COMPOUND. CANCEL maps onto v9fs's flush, with the new constraint that a client never sends CANCEL before its target; RECOVERY is a later phase, since the kernel must retain sequences and replay on reconnect, which v9fs does not do today.
 5. Kernel style overrides the no-`#define` rule; in-tree code follows kernel conventions, which use `#define` and `#ifdef` freely.
 6. Gate: the kernel codec matches the userspace client byte-for-byte, and legacy 9P2000 mounts still pass their regression suite.
@@ -574,9 +575,9 @@ Gate: two independent codecs agree byte-for-byte, malformed inputs remain within
 
 ### Phase C: useful secure prototype
 
-Implement a userspace server and mount client with CORE, POSIX, TLS/TCP, and a local Unix-socket transport. Add legacy `.L` and `.u` codecs to the same backend API without merging them. Use explicit identity mapping and export confinement. Default to uncached operation. Add synthetic echo/control/event resources alongside ordinary files. Ship a working skeleton passthrough client and server (the pair the cookbook's examples run against) with a fun example server that serves every file reversed. Provide the server as a reusable library, with a cookbook documenting how to adapt it into a backend to anything.
+Implement a userspace server and mount client with CORE, POSIX, TLS/TCP, and a local Unix-socket transport. Add legacy `.L` and `.u` codecs to the same backend API without merging them. Use explicit identity mapping and export confinement. Default to uncached operation. Report each session's dialect, transport, and peer identity. Add synthetic echo/control/event resources alongside ordinary files. Ship a working skeleton passthrough client and server (the pair the cookbook's examples run against) with a fun example server that serves every file reversed. Provide the server as a reusable library, with a cookbook documenting how to adapt it into a backend to anything.
 
-Gate: mount/read/write/create/link/rename/unlink, cross-user denial, symlink escape resistance, special-file policy, explicit durability, and cancellation work under concurrency. Publish the actual supported OS/client combinations and installation recipes.
+Gate: mount/read/write/create/link/rename/unlink, cross-user denial, symlink escape resistance, special-file policy, explicit durability, cancellation, and per-session dialect/transport/peer-identity reporting work under concurrency. Publish the actual supported OS/client combinations and installation recipes.
 
 ### Phase D: round-trip and backend features
 
