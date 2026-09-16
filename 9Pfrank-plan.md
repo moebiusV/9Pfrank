@@ -545,6 +545,16 @@ Provisional engineering targets, not promises: on hardware with adequate crypto 
 
 Estimate cost as measured CPU-seconds/GiB × projected volume plus peak required cores, memory per concurrent mount, and bandwidth/provider charges. Persistent connections amortize handshake cost. Small installations can use a simple managed CA or peer-key inventory; certificate automation and operational labor matter as much as cryptographic throughput. No paid overlay service is a protocol requirement.
 
+### 9.5 Linux v9fs kernel client
+
+The in-kernel v9fs client speaks 9P2000, `.u`, and `.L` today. Making it a native 9Pfrank client is a separate, phased effort:
+
+1. Replace the 9P2000 wire codec with the 9Pfrank codec (20-byte header, native opcodes, fieldwise codecs).
+2. Map VFS operations onto native operations: compounds for lookup/open/read, and readdir-with-attributes with sparse attributes.
+3. Keep TLS out of the kernel. The mount connects over a local transport (Unix socket or loopback) to a userspace client that holds the TLS connection, or uses kTLS after a userspace handshake; the kernel speaks only 9Pfrank framing.
+4. Keep 9P2000, `.u`, and `.L` support; native 9Pfrank is added alongside, not a replacement.
+5. Gate: the kernel codec matches the userspace client byte-for-byte, and legacy 9P2000 mounts still pass their regression suite.
+
 ## 10. Delivery plan
 
 ### Phase A: evidence and semantic inventory
