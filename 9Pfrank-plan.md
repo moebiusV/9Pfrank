@@ -9,15 +9,15 @@ Build a semantic superset of 9P2000, 9P2000.u, 9P2000.L, 9P2000.e, and 9P.origin
 - **One engine, many formats.** A single descriptor plus a per-format ops vtable covers the whole range; only what genuinely differs on disk survives as a vtable op. 9Pfrank keeps one native engine, and each legacy dialect is a codec exposing only what differs: header, opcode map, stat, transport.
 - **Fieldwise decoding, no host-struct casting.** Codecs read and write through an explicit byte-order vtable, never by casting a block to a C struct. 9Pfrank's fieldwise codecs and little-endian native header follow the same rule, and stay portable across word size and byte order.
 - **Invariant-based detection with confidence.** Probes run in two passes, strong (magic or structural) first and heuristic last; every result is tagged MAGIC, STRUCTURAL, or HEURISTIC, and a violated invariant means it is not that format. 9P.original and the version-string path are detected this way.
-- **Equivalence-class honesty.** Byte-identical editions are reported as one class ("v1, v2 or v3"), never a false-precise single member, with one canonical token. 9Pfrank reports the dialect class it detected rather than over-claiming an edition.
+- **Equivalence classes.** Byte-identical editions are reported as one class ("v1, v2 or v3") with one canonical token, not as a single edition. 9Pfrank reports the dialect class it detected.
 - **A named edition that fails to match is a hard error, not a fallback.** A client that names a dialect and mismatches is disconnected, never silently downgraded.
 - **Explicit overflow.** An on-disk maxima table bounds each edition, and every size is checked against the medium before any allocation or loop. 9Pfrank checks frame size and counts against limits and reports OVERFLOW rather than truncating.
 - **Self-delimiting parsers.** Each codec carries a one-line invariant for how much it reads. 9Pfrank's header carries the body length; the 9P.original codec delimits its own messages over any stream.
 - **The public header is the stable contract.** Internal vtables and per-backend headers change without a version bump; a change to how an existing image decodes is MAJOR. The 9Pfrank spec is the contract; a change to how an existing wire form decodes is breaking.
 - **One adapter per platform, chosen at compile time.** filsys selects its FUSE adapter by configure, not by #ifdef; 9Pfrank selects per-platform .c files the same way.
-- **Mount as a living namespace.** filsys's point is a read-write mount, not a decoder. A 9Pfrank codec presents its dialect as a live namespace; the FUSE driver mounts it.
+- **Mount as a living namespace.** filsys mounts the format read-write rather than merely decoding it. A 9Pfrank codec presents its dialect as a live namespace; the FUSE driver mounts it.
 - **Ordered writes and single-writer access.** Writes follow soft-updates rules: never point to a structure before initializing it, never reuse a resource before nullifying every prior pointer to it, never reset the last pointer to a live resource before setting a new one. A second read-write open of the same extent fails rather than silently corrupting. 9Pfrank orders durable operations the same way and assumes one writer per session.
-- **Honesty about the unverified.** The format table marks which editions have no surviving media, implemented from sources but not cross-checked against a real image. 9Pfrank flags unverified provenance (the `.e` links, the 9front TLS-PSK paths) for Phase A.
+- **Unverified formats are flagged.** The format table marks which editions have no surviving media, implemented from sources but not cross-checked against a real image. 9Pfrank flags unverified provenance (the `.e` links, the 9front TLS-PSK paths) for Phase A.
 
 Use one new dialect, `9Pfrank`, with explicit capability negotiation. The core implements one unified operation set: the semantic union of every dialect's operations. Everything that is not 9Pfrank is a codec that translates its wire protocol to 9Pfrank calls underneath, which is straightforward because 9Pfrank is a superset; each codec is therefore minimal, a shim rather than a reimplementation. Most codec work is stateless translation; a few pieces keep per-session state or real logic: the collision-free qid mapping, `..` and partial-walk emulation, `Tcreate`'s fid replacement, the 9P.original self-delimiting parser, and `.e` session restore. Wire formats stay per-dialect and are not reinterpreted; what is unified is the semantics, not the bytes. Where a dialect differs structurally, the codec performs a small, documented translation rather than requiring the native set to mirror it; for example, 9P2000 `Tcreate` turns the directory fid into the new file's fid, and legacy partial walks remain a codec behavior. The rules in this document bind 9Pfrank proper; each legacy codec speaks its dialect as that dialect defines it, including its own transport and authentication.
 
@@ -44,7 +44,7 @@ Recommended initial deployment: persistent TLS 1.3 over TCP, a userspace client 
 
 9P.original (editions 1 through 3) is a distinct pre-version wire format: no size prefix, a 2-byte tag per message, sessions open with `Tnop`/`Tsession`, names and stat records are fixed-size (28 and 116 bytes), and authentication is in-band p9sk1 with DES. Every message has a size fixed by its type apart from the count-bearing `Twrite` and `Rread`, so its codec delimits messages itself over any stream transport. The codec reports OVERFLOW for anything that does not fit its 32-bit qid paths (31 usable after the CHDIR bit), 28-byte names, and u32 stat times (which overflow in 2038), and it caps I/O at the fixed 8192-byte data limit, since there is no negotiated `msize`.
 
-p9sk1 is open to offline dictionary attack. A server with no DES key declines the ticket exchange; whether a 1st-3rd edition client then proceeds unauthenticated (`none`) is to verify in Phase A. Registering a DES key with a Plan 9 auth server is a deployment prerequisite only if p9sk1 must actually be served. The old `Tattach` `uname[28]` is not trusted as-is; local policy maps it to an identity. The exact framing is pinned in Phase A.
+p9sk1 is open to offline dictionary attack. A server with no DES key declines the ticket exchange; whether a 1st-3rd edition client then proceeds unauthenticated (`none`) is to verify in Phase A. Registering a DES key with a Plan 9 auth server is a deployment prerequisite only if p9sk1 must be served. The old `Tattach` `uname[28]` is not trusted as-is; local policy maps it to an identity. The exact framing is pinned in Phase A.
 
 ### 2.1 The `.e` dialect
 
@@ -420,7 +420,7 @@ Compounds provide ordered execution, not isolation or rollback. Concurrent clien
 
 ## 7. Recovery, replay, and disconnection
 
-RECOVERY revision 1 retains sessions **only while the same server incarnation remains alive**. It does not promise replay-safe continuation after server restart, disk rollback, or failover. Start with this honest boundary; durable replay journals can be designed later.
+RECOVERY revision 1 retains sessions **only while the same server incarnation remains alive**. It does not promise replay-safe continuation after server restart, disk rollback, or failover. Start with this boundary; durable replay journals can be designed later.
 
 A resume token is an unpredictable, server-generated opaque value, bounded to 4096 bytes, carried only inside encryption and bound server-side to the original authenticated principal, export policy, session, and retention deadline. Reauthenticate transport on resume. Possession of the token alone is insufficient. Never put it in a mount URL, command-line argument, or logs.
 
@@ -534,9 +534,9 @@ max_inflight_bytes = 33554432
 
 A legacy `.L` mount inside WireGuard is a migration bridge, not proof of 9Pfrank support. Document and test an OS-specific recipe once the server, identity model, firewall, and client implementation are selected; a generic mount command cannot establish those prerequisites.
 
-### 9.3 Where performance will actually come from
+### 9.3 Where performance will come from
 
-Encryption cost is real but workload-dependent; there is no honest universal “less than X%” promise. Separate cryptographic CPU, memory copies, syscall overhead, storage latency, and network round trips. Avoid buying hardware before measuring those components.
+Encryption cost is real but workload-dependent; there is no universal “less than X%” promise. Separate cryptographic CPU, memory copies, syscall overhead, storage latency, and network round trips. Avoid buying hardware before measuring those components.
 
 Keep connections alive and pipeline independent operations. Do not open a TLS connection per file. Use compound lookup/open/read and readdir-with-attributes. Bound bulk chunks so control traffic is not stuck behind huge writes. Use fair queues; on a single TCP stream, bytes already sent cannot be reprioritized.
 
@@ -641,7 +641,7 @@ These twelve projects are the `examples/` directory; each ships in C against the
 
 ## 11. Decisions deliberately left for review
 
-The initial choices are TLS/TCP, new framing after the legacy bootstrap, portable native flags, typed metadata, bounded compounds, and honest retained-session recovery. The following are explicit release blockers or future design work:
+The initial choices are TLS/TCP, new framing after the legacy bootstrap, portable native flags, typed metadata, bounded compounds, and retained-session recovery. The following are explicit release blockers or future design work:
 
 1. Identify and pin the `.e` implementations being covered, and define whether a LING adapter is in the first release or a separately delivered service.
 2. Decide the exact full-filesystem conformance matrix when a backend lacks devices, xattrs, ACLs, allocation, copy, or directory fsync. Protocol recognition and backend support must be separately reported.
