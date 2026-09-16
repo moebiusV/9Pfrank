@@ -4,7 +4,7 @@ Status: proposed design, revision 0.1, 2026-09-14. This is a design plan, not an
 
 ## 1. Direction
 
-Build a semantic superset of 9P2000, 9P2000.u, 9P2000.L, and 9P2000.e. Preserve 9P's central model: attach to a namespace, obtain fids, walk names, read and write resources, and release references. Support synthetic files and services as first-class resources, not merely disk files.
+Build a semantic superset of 9P2000, 9P2000.u, 9P2000.L, 9P2000.e, and 9P.original. Preserve 9P's central model: attach to a namespace, obtain fids, walk names, read and write resources, and release references. Support synthetic files and services as first-class resources, not merely disk files. 9P.original is 9P2000's pre-version predecessor: it skips the `Tversion` handshake and begins with `Tattach`, carries 16-bit fids, and has no authentication flow.
 
 Use one new dialect, `9Pfrank`, with explicit capability negotiation. The core implements a single unified operation set — the union of every dialect's operations — and each legacy dialect is a thin frontend that maps its own wire format onto that set. Because every frontend maps onto one unified set, supporting the earlier protocols is trivial. Wire formats stay per-dialect and are not reinterpreted; what is unified is the semantics, not the bytes.
 
@@ -35,10 +35,11 @@ Recommended initial deployment: persistent TLS 1.3 over TCP, a userspace client 
 ## 3. Compatibility and connection startup
 
 1. Establish the configured authenticated transport **before** sending any 9P bytes. There is no plaintext STARTTLS phase.
-2. Send the existing version-exchange framing shown below, with `version="9Pfrank"`, tag `0xffff`, and a proposed maximum message size.
-3. An exact `9Pfrank` reply switches both directions to the 2026 header immediately after that reply. Then exchange HELLO; no attach or filesystem operation is legal before HELLO completes.
-4. By default, a 9Pfrank server accepts connections from 9P2000, 9P2000.u, 9P2000.L, 9P2000.e, and original 9P clients. Local policy may restrict the permitted set; a dialect outside it is disconnected. A compatibility retry uses a fresh connection and the exact selected legacy codec. Security requirements never weaken during fallback.
-5. There is one version exchange per transport connection. Mid-session reset requires a new connection; this removes a dangerous interaction between reset, active operations, and recovery.
+2. The first message's type byte selects the path: `Tversion` (100) begins the version negotiation below; `Tattach` (104) identifies 9P.original — no version handshake — and is dispatched straight to the original-9P codec (16-bit fids, no auth flow).
+3. On the negotiated path, send the existing version-exchange framing shown below, with `version="9Pfrank"`, tag `0xffff`, and a proposed maximum message size. `9P.original` is also accepted as a version string and selects the original-9P codec.
+4. An exact `9Pfrank` reply switches both directions to the 2026 header immediately after that reply. Then exchange HELLO; no attach or filesystem operation is legal before HELLO completes.
+5. By default, a 9Pfrank server accepts connections from 9P2000, 9P2000.u, 9P2000.L, 9P2000.e, and 9P.original. Local policy may restrict the permitted set; a dialect outside it is disconnected. A compatibility retry uses a fresh connection and the exact selected legacy codec. Security requirements never weaken during fallback.
+6. There is one version exchange per transport connection. Mid-session reset requires a new connection; this removes a dangerous interaction between reset, active operations, and recovery.
 
 ```text
 # Legacy bootstrap only; little-endian integers, no padding.
@@ -573,11 +574,11 @@ Gate: either demonstrate the cache benefit with correctness evidence, or keep th
 
 ### Phase G — interoperability and release
 
-Run two independent client/server combinations, legacy regression suites, property/fuzz tests, and network/crash fault injection. Publish packet diagrams, a dissector, threat model, compatibility matrix, benchmark scripts/results, and administrator documentation. Ship the spec; a cookbook of fun, worked examples on Linux, OpenBSD, and Windows; the client and server; complete FFI shims (one `bindings/` subdirectory per language, a binding matrix, and an FFI docs page with the API reference table, C quick start, architecture diagram, and build instructions); and full documentation — manpages, GNU info, markdown, `README.distributions` with `dist/` packaging templates, an `UNBOXING` quick start, and a `CHANGES` log — in a full GNU autotools layout following GNU standards. Obtain opcode/feature/ALPN/service registration where applicable. Freeze revision 1 only after review of recovery and authorization by people outside the implementation team.
+Run two independent client/server combinations, legacy regression suites, property/fuzz tests, and network/crash fault injection. Publish packet diagrams, a dissector, threat model, compatibility matrix, benchmark scripts/results, and administrator documentation. Ship the spec; a cookbook of fun, worked examples on Linux, OpenBSD, and Windows; the linkable library; complete FFI shims (one `bindings/` subdirectory per language, a binding matrix, and an FFI docs page with the API reference table, C quick start, architecture diagram, and build instructions); the server, client, and a FUSE mount driver for the client; and full documentation — manpages, GNU info, markdown, `README.distributions` with `dist/` packaging templates, an `UNBOXING` quick start, and a `CHANGES` log — in a full GNU autotools layout following GNU standards. Obtain opcode/feature/ALPN/service registration where applicable. Freeze revision 1 only after review of recovery and authorization by people outside the implementation team.
 
 ### Cookbook — worked example projects
 
-The cookbook ships these ten projects in ascending difficulty, each small enough for a junior coder and each adding one new idea on top of the last:
+The cookbook ships these twelve projects in ascending difficulty, each small enough for a junior coder and each adding one new idea on top of the last:
 
 1. **Hello, 9Pfrank** — mount one synthetic `/hello` file that reads a fixed string.
 2. **The Clock** — `/time` and `/uptime`, computed on every read; nothing is stored.
@@ -589,8 +590,10 @@ The cookbook ships these ten projects in ascending difficulty, each small enough
 8. **Remote Clipboard** — `/clipboard` as a read/write file mirroring the host clipboard.
 9. **Magic Calculator** — write an expression to `/calc` and read the answer, or a `/primes/<n>` tree.
 10. **SQLite/API as a Filesystem** — a database table or a REST endpoint served as a directory of files.
+11. **FUSE Mount Driver** — a `libfuse3` backend that maps a mounted 9Pfrank server's namespace into the local kernel VFS, so a remote tree appears under an ordinary directory.
+12. **The Time Capsule** — the grand finale: a server whose files live in a raw Unix V6/V7 disk image, read through the filsys library — directories, inodes, and data blocks served as a living namespace.
 
-These ten projects are the `examples/` directory; each ships in C against the library and in idiomatic newLISP through the newLISP FFI binding.
+These twelve projects are the `examples/` directory; each ships in C against the library and in idiomatic newLISP through the newLISP FFI binding.
 
 ## 11. Decisions deliberately left for review
 
