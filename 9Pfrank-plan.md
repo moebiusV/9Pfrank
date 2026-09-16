@@ -27,22 +27,22 @@ Recommended initial deployment: persistent TLS 1.3 over TCP, a userspace client 
 
 9P2000.L supplies the filesystem-oriented operations above and uses Linux-specific error conventions. Preserve their functionality while defining the new dialect independently of a host ABI. [diod protocol documentation](https://github.com/chaos/diod/blob/master/protocol.md)
 
-9P.original (editions 1 through 3) is a distinct pre-version wire format: no size prefix, sessions open with `Tnop`/`Tsession`, names and stat records are fixed-size (28 and 116 bytes), and authentication is in-band p9sk1 with DES. Every message has a size fixed by its type apart from the count-bearing `Twrite` and `Rread`, so its codec delimits messages itself over any stream transport. The codec reports OVERFLOW for anything that does not fit its 32-bit qid paths (31 usable after the CHDIR bit), 28-byte names, and u32 stat times (which overflow in 2038), and it caps I/O at the fixed 8192-byte data limit, since there is no negotiated `msize`.
+9P.original (editions 1 through 3) is a distinct pre-version wire format: no size prefix, a 2-byte tag per message, sessions open with `Tnop`/`Tsession`, names and stat records are fixed-size (28 and 116 bytes), and authentication is in-band p9sk1 with DES. Every message has a size fixed by its type apart from the count-bearing `Twrite` and `Rread`, so its codec delimits messages itself over any stream transport. The codec reports OVERFLOW for anything that does not fit its 32-bit qid paths (31 usable after the CHDIR bit), 28-byte names, and u32 stat times (which overflow in 2038), and it caps I/O at the fixed 8192-byte data limit, since there is no negotiated `msize`.
 
-p9sk1 is accepted only inside the authenticated tunnel: it requires a DES key registered with a Plan 9 auth server and is open to offline dictionary attack, so the tunnel identity, not p9sk1, authorizes access. The exact framing is pinned in Phase A.
+p9sk1 is accepted only inside the authenticated tunnel and is open to offline dictionary attack, so the tunnel identity, not p9sk1, authorizes access. A server with no DES key declines the ticket exchange and lets the client proceed unauthenticated (`none`); registering a DES key with a Plan 9 auth server is a deployment prerequisite only if p9sk1 must actually be served. The exact framing is pinned in Phase A.
 
 ### 2.1 The `.e` dialect
 
-9P2000.e adds session restoration and compound ("macro") operations on top of 9P2000. It originated with Erlang-on-Xen (Cloudozer's Ling VM; Maxim Kharchenko's 2012 specification), and the qp Go library implements the same dialect. [qp package documentation](https://pkg.go.dev/github.com/csdksoftware/qp), [LING implementation documentation](https://github.com/cloudozer/ling/blob/master/doc/9p.md)
+9P2000.e adds session restoration and compound ("macro") operations on top of 9P2000. It is specified by the Erlang on Xen extension spec, which documents an 8-byte `Tsession` key, all fids preserved on reestablishment, and graceful fallback to plain 9P2000. [Erlang on Xen extension spec](https://erlangonxen.org/), [qp package documentation](https://pkg.go.dev/github.com/csdksoftware/qp), [LING implementation documentation](https://github.com/cloudozer/ling/blob/master/doc/9p.md)
 
-Its session restoration uses an unauthenticated 8-byte session key in `Tsession`: the key identifies which retained session to resume, but does not authenticate the client. 9Pfrank's `resume_proof` is bound to the authenticated principal and the session.
+Its session restoration uses an unauthenticated 8-byte session key in `Tsession`: the key identifies which retained session to resume, but does not authenticate the client. It preserves fids across reestablishment but offers no replay or duplicate suppression, so a `.e` codec provides resumption without 9Pfrank's replay guarantees. 9Pfrank's `resume_proof` is bound to the authenticated principal and the session.
 
 9Pfrank preserves these capabilities natively: session resumption, bounded duplicate suppression, and ordered compounds. LING's Erlang-specific authentication and internode messaging are a separate concern, handled by a separately named adapter module rather than the `.e` wire protocol.
 
 ## 3. Compatibility and connection startup
 
 1. Native 9Pfrank traffic establishes the configured authenticated transport **before** any 9P bytes. There is no plaintext STARTTLS phase. Legacy plaintext clients (Linux v9fs) do not speak TLS; they are accepted only through an authenticated tunnel (WireGuard, or a TLS/SSH terminator) or a local Unix socket, never in plaintext on an exposed TCP port.
-2. The first bytes select the path. A self-consistent `Tversion` (type 100 at offset 4, `size` equal to 13 plus the version-string length) begins the version path. Otherwise, check the original-9P invariants: byte 0 is a known original-9P type, and the message length matches what that type fixes (`Tnop` is one byte; `Tsession` is its type plus an 8-byte challenge). Every invariant holding marks 9P.original; a violation means it is not, and the connection is dropped. On the version path, the server matches the client's `version` string exactly to select a codec: `9P2000`, `9P2000.u`, `9P2000.L`, and `9P2000.e` select their legacy codecs; `9Pfrank` selects the native codec. Any other string beginning with `9P` (for example `9P2000.x` or `9P2001`) is answered `9P2000`, the highest legacy version the server supports; anything else is answered `unknown`.
+2. Byte 0 selects the path first: `Tnop` or `Tsession` dispatches to the original-9P codec immediately. Otherwise read 13 bytes and require a self-consistent `Tversion` (type 100 at offset 4, `size` equal to 13 plus the version-string length); anything else is dropped. The checks do not collide: a `Tversion`'s byte 0 is the low byte of its size, which equals `Tnop` or `Tsession` only for version strings 37 or 71 bytes long, lengths no accepted dialect uses. On the version path, the server matches the client's `version` string exactly to select a codec: `9P2000`, `9P2000.u`, `9P2000.L`, and `9P2000.e` select their legacy codecs; `9Pfrank` selects the native codec. Any other version string is handled per version(5): strip a `.suffix`, require `9P` followed by digits; if the digits are at least 2000, reply `9P2000`, otherwise reply `unknown`.
 3. A native client sends `version="9Pfrank"`, tag `0xffff`, and a proposed maximum message size. Any reply other than exactly `9Pfrank` means the server does not speak the native dialect, so in-place downgrade to 9P2000 is impossible; a native client that must fall back to a legacy dialect opens a fresh connection and sends that dialect's own version string.
 4. An exact `9Pfrank` reply switches both directions to the native header immediately after that reply. Then exchange HELLO; no attach or filesystem operation is legal before HELLO completes.
 5. By default, a 9Pfrank server accepts 9P2000, 9P2000.u, 9P2000.L, 9P2000.e, and 9P.original clients. Local policy may restrict the permitted set; a dialect outside it is disconnected. A compatibility retry uses a fresh connection and the exact selected legacy codec. Security requirements never weaken during fallback.
@@ -198,13 +198,13 @@ Attributes {
     btime:Time;             # bit 11
     plan9_flags:u64;        # bit 12
     last_modifier:Principal; # bit 13
-    ext:Ext;                # present when extension records are used
+    ext:Ext;                # always present; empty when unused
 }
 ```
 
 Kinds: REGULAR=1, DIRECTORY=2, SYMLINK=3, CHAR_DEVICE=4, BLOCK_DEVICE=5, FIFO=6, SOCKET_NODE=7, SERVICE=8, AUTH=9. A socket node does not imply remote socket-connect support. `plan9_flags`: APPEND_ONLY=1, EXCLUSIVE_OPEN=2, MOUNT_POINT=4, TEMPORARY=8. These flags need documented server enforcement; TEMPORARY is a storage hint, not automatic deletion.
 
-Attribute validity bits 0..15 select, respectively: mode, owner, group, nlink, size, allocated_bytes, preferred_io, device pair, atime, mtime, ctime, btime, plan9_flags, last_modifier, stable identity, change counter. `valid` and `ref` are always present; a selected trailing field (bits 0..13) follows in bit order and an unselected one is omitted. Bits 14 (stable identity) and 15 (change counter) qualify `ref` and add no trailing field. Unknown validity bits are rejected in requests, ignored in responses. The object kind is always meaningful.
+Attribute validity bits 0..14 select, respectively: mode, owner, group, nlink, size, allocated_bytes, preferred_io, device pair, atime, mtime, ctime, btime, plan9_flags, last_modifier, stable identity. `valid` and `ref` are always present; a selected trailing field (bits 0..13) follows in bit order and an unselected one is omitted. Bit 14 (stable identity) qualifies `ref` and adds no trailing field; the change counter is signalled by `ref.change_valid`. Unknown validity bits are rejected in requests, ignored in responses. The object kind is always meaningful.
 
 Fids are nonzero `u64`, scoped to one session, allocated by the client. No second operation may claim an existing fid. An object's identity is separate from a particular open reference. A generation changes before reusing an object number. An export that cannot guarantee persistence must clear stable-identity validity; it still needs unique live-session identities. Identity alone does not grant access or reopen authority.
 
@@ -468,7 +468,7 @@ TLS 1.3 provides authenticated encryption, modern key establishment, resumption,
 
 WireGuard uses a defined authenticated key exchange and ChaCha20-Poly1305. It is a useful option for legacy 9P traffic, but its peer key identifies a peer, not every account on that peer. Bind the server to its tunnel address, firewall alternate paths, and map peers to tightly scoped export identities or require additional per-user authentication. [WireGuard protocol](https://www.wireguard.com/protocol/)
 
-9front reaches a server through `rcpu`/`rexport`: `tlsclient -a` runs `auth_proxy` with `proto=p9any` over the plain connection first, then keys TLS with the resulting secret as a PSK. Two claims need verification: that 9front's libsec lacks TLS 1.3 client-certificate support, and that LibreSSL lacks the PSK cipher suites (the `openssl11` package name is from an old README and may be stale).
+9front is accepted: the server offers the 9P2000 codec over dp9ik pre-auth plus TLS-PSK, which requires registration with a 9front auth server. The flow is `tlsclient -a` running `auth_proxy` with `proto=p9any` over the plain connection first, then TLS keyed with the resulting secret as a PSK. Three claims need verification: that 9front's libsec lacks TLS 1.3 client-certificate support, that it negotiates TLS 1.2 PSK rather than TLS 1.3, and that LibreSSL lacks the PSK cipher suites (the `openssl11` package name is from an old README and may be stale).
 
 Choose one encryption boundary deliberately. TLS inside WireGuard can be appropriate for end-to-end process authentication or different administrative boundaries, but adds processing and packet overhead. Benchmark that choice. A tunnel terminating on a gateway protects only as far as that gateway unless the backend leg is also secured.
 
@@ -560,7 +560,7 @@ Gate: two independent codecs agree byte-for-byte, malformed inputs remain within
 
 ### Phase C: useful secure prototype
 
-Implement a userspace server and mount client with CORE, POSIX, TLS/TCP, and a local Unix-socket transport. Add legacy `.L` and `.u` codecs to the same backend API without merging them. Use explicit identity mapping and export confinement. Default to uncached operation. Add synthetic echo/control/event resources alongside ordinary files. Ship a working skeleton passthrough client and server (the pair the cookbook's examples run against) with a fun example server that serves every file reversed. Provide the server as a reusable library, with a cookbook documenting how to adapt it into a codec to anything.
+Implement a userspace server and mount client with CORE, POSIX, TLS/TCP, and a local Unix-socket transport. Add legacy `.L` and `.u` codecs to the same backend API without merging them. Use explicit identity mapping and export confinement. Default to uncached operation. Add synthetic echo/control/event resources alongside ordinary files. Ship a working skeleton passthrough client and server (the pair the cookbook's examples run against) with a fun example server that serves every file reversed. Provide the server as a reusable library, with a cookbook documenting how to adapt it into a backend to anything.
 
 Gate: mount/read/write/create/link/rename/unlink, cross-user denial, symlink escape resistance, special-file policy, explicit durability, and cancellation work under concurrency. Publish the actual supported OS/client combinations and installation recipes.
 
@@ -600,7 +600,7 @@ The cookbook ships these twelve projects in ascending difficulty, each small eno
 8. **Remote Clipboard**: `/clipboard` as a read/write file mirroring the host clipboard.
 9. **Magic Calculator**: write an expression to `/calc` and read the answer, or a `/primes/<n>` tree.
 10. **SQLite/API as a Filesystem**: a database table or a REST endpoint served as a directory of files.
-11. **FUSE Read-only Mount**: point the existing filsys FUSE adapter at a 9Pfrank client instead of a disk image, exposing the namespace read-only. Interrupt-to-CANCEL mapping and lock owners stay in the full driver.
+11. **FUSE Read-only Mount**: point the existing filsys FUSE adapter at a 9Pfrank client instead of a disk image, exposing the namespace read-only. Interrupt-to-CANCEL mapping and lock owners stay in the full driver. macOS goes through macFUSE; FSKit is not FUSE-compatible.
 12. **The Time Capsule**: the grand finale, a server whose files live in any pre-FFS Unix image (V0 through V7, 32V, Coherent, Xenix, 2.9/2.11BSD), read through the filsys library.
 
 These twelve projects are the `examples/` directory; each ships in C against the library and in idiomatic newLISP through the newLISP FFI binding. Because newLISP is single-threaded, the library must expose a caller-owned, poll-driven (non-blocking, no internal threads) event-loop mode so the binding delivers callbacks on the interpreter thread. The cookbook links filsys; record its license alongside 9Pfrank's ISC.
@@ -622,7 +622,7 @@ The intended result is a small usable core with explicit extension contracts: tr
 
 ## 12. Platform support appendix
 
-Targets: Linux, illumos, and the BSDs (FreeBSD, NetBSD, OpenBSD, DragonFly BSD). Windows (WinFsp) and macOS (macFUSE, FSKit) run the userspace server too, but their backend rows are not covered here.
+The server is userspace and needs no kernel driver, so it runs on Windows and macOS as well as the POSIX family. WinFsp, macFUSE, and FSKit are client mount layers, not server backends. This matrix covers the POSIX backends: Linux, illumos, and the BSDs (FreeBSD, NetBSD, OpenBSD, DragonFly BSD); Windows and macOS backend rows are not yet enumerated.
 
 ### 12.1 Conformance vs. backend coverage
 
