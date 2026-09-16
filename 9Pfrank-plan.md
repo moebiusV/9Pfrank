@@ -1,22 +1,22 @@
 # 9Pfrank: protocol design and implementation plan
 
-Status: proposed design, revision 0.1, 2026-09-14. This is a design plan, not an existing standard or a claim of client support. All 2026 layouts, numbers, limits, and requirements below are proposed. `MUST` and `SHOULD` describe the intended contract. Freeze the wire format only after two independent implementations interoperate.
+Status: proposed design, revision 0.1, 2026-09-14. This is a design plan, not an existing standard or a claim of client support. All layouts, numbers, limits, and requirements below are proposed. `MUST` and `SHOULD` describe the intended contract. Freeze the wire format only after two independent implementations interoperate.
 
 ## 1. Direction
 
-Build a semantic superset of 9P2000, 9P2000.u, 9P2000.L, 9P2000.e, and 9P.original. Preserve 9P's central model: attach to a namespace, obtain fids, walk names, read and write resources, and release references. Support synthetic files and services as first-class resources, not merely disk files. 9P.original is 9P2000's pre-version predecessor: it skips the `Tversion` handshake and begins with `Tattach`, carries 16-bit fids, and has no authentication flow.
+Build a semantic superset of 9P2000, 9P2000.u, 9P2000.L, and 9P2000.e. Preserve 9P's central model: attach to a namespace, obtain fids, walk names, read and write resources, and release references. Support synthetic files and services as first-class resources, not merely disk files. Original 9P (editions 1 through 3) is out of scope for this revision: it has a different wire format (no `Tversion`; sessions open with `Tnop`/`Tsession`; fixed 28-byte names and 116-byte stat records; in-band p9sk1/DES authentication over a message-boundary-preserving transport). It is a possible future adapter.
 
-Use one new dialect, `9Pfrank`, with explicit capability negotiation. The core implements a single unified operation set — the union of every dialect's operations — and each legacy dialect is a thin frontend that maps its own wire format onto that set. Because every frontend maps onto one unified set, supporting the earlier protocols is trivial. Wire formats stay per-dialect and are not reinterpreted; what is unified is the semantics, not the bytes.
+Use one new dialect, `9Pfrank`, with explicit capability negotiation. The core implements one unified operation set: the semantic union of every dialect's operations. Each legacy dialect is a frontend that maps its own wire format onto that set, so supporting the earlier protocols is a bounded, mechanical translation. Wire formats stay per-dialect and are not reinterpreted; what is unified is the semantics, not the bytes. Where a dialect differs structurally, the frontend performs a small, documented translation rather than requiring the native set to mirror it; for example, 9P2000 `Tcreate` turns the directory fid into the new file's fid, and legacy partial walks remain a frontend behavior.
 
 The full filesystem implementation should provide all applicable predecessor operations. Small synthetic servers may advertise a smaller profile. Unsupported backend features must produce explicit errors; they must never succeed without providing the promised behavior. “9Pfrank core” and “9Pfrank full filesystem” are distinct conformance claims.
 
-Recommended initial deployment: persistent TLS 1.3 over TCP, a userspace client and server, bounded pipelining, compound metadata operations, and conservative caching. Add reconnect recovery and coherent caching only after correctness and measurements justify them. WireGuard is an excellent deployment option where an encrypted host network already exists. The reference implementation is written in C99 — the highest standard the OpenBSD kernel compiles — so it builds across all major open-source distributions. The library uses a no-macro style: `#define` is permitted only for header guards; all constants are `const` or `enum`. It exposes a stable C ABI — a single public C99 header, using the standard `#ifdef __cplusplus`/`extern "C"` guard so C++ consumers link with C linkage — as the FFI surface.
+Recommended initial deployment: persistent TLS 1.3 over TCP, a userspace client and server, bounded pipelining, compound metadata operations, and conservative caching. Add reconnect recovery and coherent caching only after correctness and measurements justify them. WireGuard is an excellent deployment option where an encrypted host network already exists. The reference implementation is written in C99, which builds across all major open-source distributions. It is a userspace library and server, so the OpenBSD kernel's language level does not constrain it; kernel portability, if pursued later, is a separate goal. The library uses a no-macro style: `#define` is permitted only for header guards; all constants are `const` or `enum`. Under C99 a `const` object is not a constant expression, so enum constants carry the array sizes and `case` labels; and because enum constants must fit in `int`, the u64 masks and limits are `static const` objects rather than enum members. It exposes a stable C ABI: a single public C99 header, using the standard `#ifdef __cplusplus`/`extern "C"` guard so C++ consumers link with C linkage, as the FFI surface.
 
 ## 2. What is being unified
 
 | Heritage | Keep | Change in 9Pfrank |
 | --- | --- | --- |
-| 9P2000 | Namespaces, fids, tag multiplexing, walk, auth files, synthetic resources, flush | Larger tags and fids; explicit lifetimes, bounds, ordering, and cancellation outcomes |
+| 9P2000 | Namespaces, fids, tag multiplexing, walk, auth files, synthetic resources, flush | Larger fids and a monotonic session sequence replacing the small tag; explicit lifetimes, bounds, ordering, and cancellation outcomes |
 | 9P2000.u | Unix object kinds, ownership, special mode bits, human-readable errors | Typed metadata rather than overloaded extension strings; identity domains rather than implicit global UID agreement |
 | 9P2000.L | POSIX-oriented open/create, metadata, directory iteration, links, xattrs, locking, fsync, statfs | Protocol-owned flags and error codes; portable device numbers; precise durability and lock ownership |
 | 9P2000.e recovery/shortcut lineage | Reconnectable sessions and fewer round trips for small files | Authenticated session resumption, bounded duplicate suppression, general ordered compounds |
@@ -28,17 +28,19 @@ Recommended initial deployment: persistent TLS 1.3 over TCP, a userspace client 
 
 ### 2.1 The `.e` dialect
 
-9P2000.e adds session restoration and compound ("macro") operations on top of 9P2000. It originated with Erlang-on-Xen (Cloudozer's Ling VM; Maxim Kharchenko's 2012 specification), and the qp Go library implements the same dialect. [qp package documentation](https://pkg.go.dev/github.com/csdksoftware/qp), [LING implementation documentation](https://github.com/cloudozer/ling/blob/master/doc/9p.md)
+9P2000.e adds session restoration and compound ("macro") operations on top of 9P2000. It originated with Erlang-on-Xen (Cloudozer's Ling VM; Maxim Kharchenko's 2012 specification), and the qp Go library implements the same dialect. These provenance links are unverified. [qp package documentation](https://pkg.go.dev/github.com/csdksoftware/qp), [LING implementation documentation](https://github.com/cloudozer/ling/blob/master/doc/9p.md)
+
+Its session restoration uses an unauthenticated 8-byte session key in `Tsession`: the key identifies which retained session to resume, but does not authenticate the client. 9Pfrank's `resume_proof` is bound to the authenticated principal and the session.
 
 9Pfrank preserves these capabilities natively: session resumption, bounded duplicate suppression, and ordered compounds. LING's Erlang-specific authentication and internode messaging are a separate concern, handled by a separately named adapter module rather than the `.e` wire protocol.
 
 ## 3. Compatibility and connection startup
 
-1. Establish the configured authenticated transport **before** sending any 9P bytes. There is no plaintext STARTTLS phase.
-2. The first message's type byte selects the path: `Tversion` (100) begins the version negotiation below; `Tattach` (104) identifies 9P.original — no version handshake — and is dispatched straight to the original-9P codec (16-bit fids, no auth flow).
-3. On the negotiated path, send the existing version-exchange framing shown below, with `version="9Pfrank"`, tag `0xffff`, and a proposed maximum message size. `9P.original` is also accepted as a version string and selects the original-9P codec.
-4. An exact `9Pfrank` reply switches both directions to the 2026 header immediately after that reply. Then exchange HELLO; no attach or filesystem operation is legal before HELLO completes.
-5. By default, a 9Pfrank server accepts connections from 9P2000, 9P2000.u, 9P2000.L, 9P2000.e, and 9P.original. Local policy may restrict the permitted set; a dialect outside it is disconnected. A compatibility retry uses a fresh connection and the exact selected legacy codec. Security requirements never weaken during fallback.
+1. Native 9Pfrank traffic establishes the configured authenticated transport **before** any 9P bytes. There is no plaintext STARTTLS phase. Legacy plaintext clients (Linux v9fs, 9front before its TLS-PSK handshake) do not speak TLS; they are accepted only through an authenticated tunnel (WireGuard, or a TLS/SSH terminator) or a local Unix socket, never in plaintext on an exposed TCP port.
+2. The first message is a `Tversion` (100) and begins the version negotiation below. The server matches the client's `version` string exactly to select a codec: `9P2000`, `9P2000.u`, and `9P2000.L` select their legacy codecs; `9P2000` followed by a `.e` `Tsession` selects the `.e` codec; `9Pfrank` selects the native codec.
+3. A native client sends `version="9Pfrank"`, tag `0xffff`, and a proposed maximum message size. The string `9Pfrank` is deliberately not conformant with version(5): it carries no numeric suffix, so a legacy server replies `unknown` rather than negotiating down. In-place downgrade to 9P2000 is therefore impossible; a native client that must fall back to a legacy dialect opens a fresh connection and sends that dialect's own version string.
+4. An exact `9Pfrank` reply switches both directions to the native header immediately after that reply. Then exchange HELLO; no attach or filesystem operation is legal before HELLO completes.
+5. By default, a 9Pfrank server accepts 9P2000, 9P2000.u, and 9P2000.L clients; 9P2000.e is under review. Local policy may restrict the permitted set; a dialect outside it is disconnected. A compatibility retry uses a fresh connection and the exact selected legacy codec. Security requirements never weaken during fallback.
 6. There is one version exchange per transport connection. Mid-session reset requires a new connection; this removes a dangerous interaction between reset, active operations, and recovery.
 
 ```text
@@ -48,9 +50,9 @@ Rversion = size:u32 type:u8=101 tag:u16=65535 msize:u32 version:str16
 str16    = length:u16 bytes:u8[length]
 ```
 
-The legacy envelope and version-negotiation mechanism come from 9P2000. The post-reply switch is new. The returned `msize` includes the 9P frame header, excludes transport overhead, and cannot exceed the client's offer. Require at least 4096 bytes for 2026. [9P2000 version specification](https://ericvh.github.io/9p-rfc/rfc9p2000.html)
+The legacy envelope and version-negotiation mechanism come from 9P2000. The post-reply switch is new. The returned `msize` includes the 9P frame header, excludes transport overhead, and cannot exceed the client's offer. Require at least 4096 bytes for 9Pfrank. [9P2000 version specification](https://ericvh.github.io/9p-rfc/rfc9p2000.html)
 
-Never advertise 2026 support merely because a server accepts `.L`. Legacy adapters retain legacy qids, flag values, stat encodings, partial-walk semantics, and remove/clunk behavior. They must report overflow when new identities, timestamps, sizes, or IDs cannot be represented. Legacy qid translation needs a collision-free mapping for the adapter's advertised lifetime; truncating an object ID is insufficient.
+Never advertise 9Pfrank support merely because a server accepts `.L`. Legacy adapters retain legacy qids, flag values, stat encodings, partial-walk semantics, and remove/clunk behavior. They must report overflow when new identities, timestamps, sizes, or IDs cannot be represented. Legacy qid translation needs a collision-free mapping for the adapter's advertised lifetime; truncating an object ID is insufficient.
 
 ## 4. Exact encoding conventions
 
@@ -71,7 +73,7 @@ Ext           = byte_length:u32 records:TLV[...]            # exact byte budget
 
 `Time` is POSIX time relative to 1970-01-01 UTC; nanoseconds are 0..999,999,999. It is not a monotonic timer and carries no leap-second representation. Protocol timeouts use monotonic durations, never wall-clock timestamps.
 
-A name is nonempty and contains neither slash nor NUL. Mutation names may not be `.` or `..`. The native walk rejects both; root is represented by a fid. Names are byte-preserving, not implicitly Unicode-normalized or case-folded. Exports report their own naming constraints. Symlink targets are blobs, may contain slash, and may not contain NUL. Text identities and diagnostics are separate from filesystem names.
+A name is nonempty and contains neither slash nor NUL. Mutation names (CREATE, LINK, RENAME, UNLINK targets) may not be `.` or `..`. Walk components may be `.` (a no-op that returns the current fid) or `..` (the parent, clamped at the attach root); root itself is represented by a fid. Names are byte-preserving, not implicitly Unicode-normalized or case-folded. Exports report their own naming constraints. Symlink targets are blobs, may contain slash, and may not contain NUL. Text identities and diagnostics are separate from filesystem names.
 
 All lengths must fit the remaining frame, negotiated limits, and checked arithmetic before allocation. A count does not authorize an allocation proportional to an untrusted maximum. Unknown mandatory TLVs (`flags & 1`) fail with UNSUPPORTED; optional unknown TLVs are skipped. Other TLV flag bits are reserved. Duplicate TLV types are invalid unless that type explicitly permits repetition. Core operations end in `Ext`, empty when unused; unknown trailing bytes outside it are invalid.
 
@@ -79,18 +81,16 @@ All lengths must fit the remaining frame, negotiated limits, and checked arithme
 
 ```text
 Frame {
-    size:       u32;     # includes this field; minimum 32
+    size:       u32;     # includes this field; minimum 20
     opcode:     u16;
     flags:      u16;     # RESPONSE=1; other bits zero in revision 1
-    tag:        u64;     # identifies a live exchange; zero reserved
-    sequence:   u64;     # request identity, distinct from reusable tag
-    body_size:  u32;     # exactly size - 32
+    sequence:   u64;     # request identity; responses echo it
     reserved:   u32;     # MUST be zero
-    body:       u8[body_size];
-}                       # fixed header = 32 bytes
+    body:       u8[size - 20];
+}                       # fixed header = 20 bytes
 ```
 
-Responses echo opcode, tag, and sequence. Every response body begins with `Result`. Every request has a nonzero, monotonically allocated session sequence; clients may transmit them out of order. Never reuse a sequence in a session, including after reconnect. Tags may be reused only after the corresponding terminal reply. No unsolicited server frames in revision 1; notification delivery uses a pending request.
+Responses echo opcode and sequence. Every response body begins with `Result`. Every request has a nonzero, monotonically allocated session sequence; clients may transmit them out of order. Never reuse a sequence in a session, including after reconnect. No unsolicited server frames in revision 1; notification delivery uses a pending request.
 
 ```text
 Result {
@@ -107,7 +107,7 @@ Result {
 
 `effect` describes externally visible side effects, not whether bytes reached the network. Pure reads of regular files use NONE; consuming reads of synthetic resources may have effects. A valid error is not automatically safe to retry. Unknown or partial mutation outcomes must reach the application or recovery logic.
 
-Proposed error registry, independent of libc: OK=0, PERMISSION=1, NOT_FOUND=2, EXISTS=3, NOT_DIR=4, IS_DIR=5, INVALID=6, UNSUPPORTED=7, IO=8, NO_SPACE=9, QUOTA=10, READ_ONLY=11, BUSY=12, STALE=13, AGAIN=14, CONFLICT=15, CANCELLED=16, TOO_LARGE=17, AUTH=18, SESSION_LOST=19, REPLAY_EXPIRED=20, OUTCOME_UNKNOWN=21, CROSS_DEVICE=22, NOT_EMPTY=23, LOOP=24, OVERFLOW=25, BAD_FID=26, RESOURCE_LIMIT=27, RANGE=28, NO_DATA=29, BAD_COOKIE=30. Reserve 31..4095 for future standard errors, 4096..65535 for registered extensions. The freeze deliverable includes exhaustive errno mappings, including a generic IO fallback for unknown codes; diagnostic text never changes control flow.
+Proposed error registry, independent of libc: OK=0, PERMISSION=1, NOT_FOUND=2, EXISTS=3, NOT_DIR=4, IS_DIR=5, INVALID=6, UNSUPPORTED=7, IO=8, NO_SPACE=9, QUOTA=10, READ_ONLY=11, BUSY=12, STALE=13, AGAIN=14, CONFLICT=15, CANCELLED=16, TOO_LARGE=17, AUTH=18, SESSION_LOST=19, REPLAY_EXPIRED=20, OUTCOME_UNKNOWN=21, CROSS_DEVICE=22, NOT_EMPTY=23, LOOP=24, OVERFLOW=25, BAD_FID=26, RESOURCE_LIMIT=27, RANGE=28, NO_DATA=29, BAD_COOKIE=30. Reserve 31..4095 for future standard errors, 4096..65535 for registered extensions. The freeze deliverable includes exhaustive errno mappings, including a generic IO fallback for unknown codes; diagnostic text never changes control flow. The 9P2000 frontend maps these codes to the canonical Plan 9 error strings existing programs match (for example NOT_FOUND to "file does not exist").
 
 ### 4.2 HELLO and limits
 
@@ -219,8 +219,8 @@ Opcode numbers below are proposed native numbers, unrelated to legacy numbers. `
 04 OPEN    T { fid:u64 access:u8 flags:u32 }
            R { ref:ObjectRef max_io:u32 }
 05 CREATE  T { dirfid:u64 newfid:u64 name:name kind:u8 mode:u32
-               group:Principal access:u8 flags:u32 target:blob
-               device_major:u32 device_minor:u32 }
+               group:Principal access:u8 flags:u32 plan9_flags:u64
+               target:blob device_major:u32 device_minor:u32 }
            R { ref:ObjectRef attrs:Attributes max_io:u32 }
 06 READ    T { fid:u64 offset:u64 count:u32 }
            R { data:blob eof:u8 change_valid:u8 change:u64 }
@@ -238,29 +238,30 @@ Opcode numbers below are proposed native numbers, unrelated to legacy numbers. `
 14 RENAME  T { olddir:u64 oldname:name newdir:u64 newname:name flags:u32 }
            R { }
 15 UNLINK  T { dirfid:u64 name:name flags:u32 } R { }
-16 FSYNC   T { fid:u64 flags:u32 } R { }
-17 STATFS  T { fid:u64 } R { info:FSInfo }
-18 CANCEL  T { target_sequence:u64 }
+16 REMOVE  T { fid:u64 } R { }
+17 FSYNC   T { fid:u64 flags:u32 } R { }
+18 STATFS  T { fid:u64 } R { info:FSInfo }
+19 CANCEL  T { target_sequence:u64 }
            R { disposition:u8 }
-19 AUTH    T { newfid:u64 method:text requested:Principal export:text }
+20 AUTH    T { newfid:u64 method:text requested:Principal export:text }
            R { ref:ObjectRef }
-20 XATTR   T { fid:u64 action:u8 name:blob value:blob max_bytes:u32 flags:u32 }
+21 XATTR   T { fid:u64 action:u8 name:blob value:blob max_bytes:u32 flags:u32 }
            R { value:blob names:array<blob> required_bytes:u32 }
-21 LOCK    T { fid:u64 owner:id128 action:u8 kind:u8 start:u64 length:u64 }
+22 LOCK    T { fid:u64 owner:id128 action:u8 kind:u8 start:u64 length:u64 }
            R { granted:u8 conflict:LockConflict }
-22 COMPOUND # Section 6
-23 ACK     T { through_sequence:u64 } R { }
-24 WATCH   T { fid:u64 mask:u32 recursive:u8 }
+23 COMPOUND # Section 6
+24 ACK     T { through_sequence:u64 } R { }
+25 WATCH   T { fid:u64 mask:u32 recursive:u8 }
            R { subscription:u64 next_event:u64 }
-25 EVENTS  T { subscription:u64 after_event:u64 max_bytes:u32 wait_ms:u32 }
+26 EVENTS  T { subscription:u64 after_event:u64 max_bytes:u32 wait_ms:u32 }
            R { overflow:u8 events:array<Event> }
-26 UNWATCH T { subscription:u64 } R { }
-27 SPACE   T { fid:u64 action:u8 offset:u64 length:u64 }
+27 UNWATCH T { subscription:u64 } R { }
+28 SPACE   T { fid:u64 action:u8 offset:u64 length:u64 }
            R { offset:u64 }
-28 COPY    T { sourcefid:u64 source_offset:u64 destfid:u64 dest_offset:u64
+29 COPY    T { sourcefid:u64 source_offset:u64 destfid:u64 dest_offset:u64
                length:u64 flags:u32 }
            R { copied:u64 }
-29 LEASE   # Section 8; deferred until its state machine is proven
+30 LEASE   # Section 8; deferred until its state machine is proven
 ```
 
 Any mutation can fail for an unsupported backend operation. Read-only exports can conform by rejecting writes with READ_ONLY. Unsupported object kinds use UNSUPPORTED. Error paths must release all unpublished temporary fids/resources.
@@ -286,7 +287,13 @@ AttrUpdate {
 DirEntry {
     name:name;
     next_cookie:blob;
-    attrs:Attributes;      # object kind/ref plus requested valid attributes
+    kind:u8;               # object kind, always present
+    ref:ObjectRef;         # object identity, always present
+    valid:u64;             # §4.3 validity bits
+    # The attribute fields whose valid bit is set follow, in the fixed §4.3
+    # bit order. Fields without their bit set are omitted, so an entry with
+    # only the common attributes stays small. GETATTR/SETATTR keep the full
+    # fixed Attributes record.
 }
 FSInfo {
     filesystem:id128;
@@ -326,43 +333,43 @@ Unselected update fields must use zero/empty encodings. A conditional SETATTR co
 
 ### 5.2 Essential semantics and flags
 
-- **Walk:** all-or-nothing native walk; zero components clones an unopened reference. Success returns one ref per component, zero refs for a clone. No implicit symlink following. Clients read symlink targets and resolve explicitly within their namespace, with a configured link limit. The export boundary cannot be escaped through backend symlinks or mount races. Legacy partial walks remain an adapter behavior.
-- **Open/create:** access NONE=0, READ=1, WRITE=2, READ_WRITE=3. OPEN rejects NONE. Open flags: APPEND=1, TRUNCATE=2, EXCLUSIVE=4, NONBLOCK=8, REMOVE_ON_CLUNK=16, DIRECTORY_ONLY=32. EXCLUSIVE is valid only for CREATE. CREATE atomically creates or opens a regular file; EXCLUSIVE fails on existence. Other kinds require EXCLUSIVE and access NONE. A newly created regular file with access NONE returns an unopened fid. The parent fid never changes. Invalid combinations fail before mutation. `mode` is the final requested permission mask after client umask; the server may restrict it under export policy/default ACLs. Setgid inheritance overrides requested group where required.
+- **Walk:** all-or-nothing native walk; zero components clones an unopened reference. A `.` component is a no-op returning the current ref; a `..` component moves to the parent, clamped at the attach root, and cannot escape the export boundary. Success returns one ref per component, zero refs for a clone. No implicit symlink following. Clients read symlink targets and resolve explicitly within their namespace, with a configured link limit. The export boundary cannot be escaped through backend symlinks or mount races. Legacy partial walks remain an adapter behavior.
+- **Open/create:** access NONE=0, READ=1, WRITE=2, READ_WRITE=3, EXEC=4 (a bit, combinable: READ_EXEC=5, WRITE_EXEC=6, READ_WRITE_EXEC=7); EXEC corresponds to 9P2000 `OEXEC`. OPEN rejects NONE. Open flags: APPEND=1, TRUNCATE=2, EXCLUSIVE=4, NONBLOCK=8, REMOVE_ON_CLUNK=16, DIRECTORY_ONLY=32. EXCLUSIVE is valid only for CREATE. CREATE atomically creates or opens a regular file; EXCLUSIVE fails on existence. CREATE also takes `plan9_flags`, applied atomically at creation so APPEND_ONLY and EXCLUSIVE_OPEN take effect with no intervening open. Other kinds require EXCLUSIVE and access NONE. A newly created regular file with access NONE returns an unopened fid. The parent fid never changes. Invalid combinations fail before mutation. `mode` is the final requested permission mask after client umask; the server may restrict it under export policy/default ACLs. Setgid inheritance overrides requested group where required.
 - **Append:** the server chooses the EOF and writes atomically with respect to other append writes to that object. Replies give the actual offset; a client read-EOF/write sequence is not a substitute. Report unsupported if the backend cannot provide this guarantee. APPEND_ONLY applies across all opens; flags cannot bypass it.
 - **I/O:** offsets use byte positions for regular files. SERVICE resources document whether offsets matter and whether reads consume state. Partial writes return the accepted byte count; partial failure details use TLV type 2 with `count:u32 actual_offset:u64`. Empty writes are not a synchronization primitive. Returned data must fit both `max_io` and the actual encoded response budget. `eof=1` means observed end of resource, not “short read.”
 - **Durability:** WRITE stability 0=ACCEPTED, 1=DATA_STABLE, 2=FILE_STABLE. A success must meet the requested level; ACCEPTED may be volatile. FSYNC flags DATA_ONLY=1; zero means file data and required metadata. Directory FSYNC commits directory entries if supported. Durable replacement requires writing/syncing the temporary file, renaming, and syncing the relevant parent directories. CLUNK is not fsync. A storage backend must honor hardware flush guarantees before claiming stable completion.
-- **Lifetime/order:** a successful CLUNK releases the fid. REMOVE_ON_CLUNK requires an unambiguous server-held directory-entry reference; refuse it if safe semantics cannot be implemented. Operations referencing one fid are executed in request-admission order on the initial TCP transport. Different fids can race, including aliases of one object. A client waits for writes before sending an fsync that must include them. CLUNK waits for earlier uses of that fid. Compound ordering is explicit. Do not infer application intent from numeric sequence gaps.
+- **Lifetime/order:** a successful CLUNK releases the fid. REMOVE_ON_CLUNK requires an unambiguous server-held directory-entry reference; refuse it if safe semantics cannot be implemented. Operations referencing one fid are executed in request-admission order on the initial TCP transport; assigning `newfid` (WALK, CREATE, AUTH) counts as referencing, so WALK(newfid=5) is ordered before any later operation on fid 5. Different fids can race, including aliases of one object. A client waits for writes before sending an fsync that must include them. CLUNK waits for earlier uses of that fid. Compound ordering is explicit. Do not infer application intent from numeric sequence gaps.
 - **Directory iteration:** empty cookie starts an iteration; every entry supplies the next opaque cookie, bound to that directory, authorization view, and iteration generation. Return complete entries only. An empty non-EOF result is prohibited: return TOO_LARGE if one entry cannot fit. Mutation may invalidate iteration and return BAD_COOKIE; no snapshot guarantee unless a future feature explicitly supplies it. READ on a directory returns IS_DIR; adapters serialize legacy stat records when necessary.
-- **Rename/unlink:** RENAME flags NOREPLACE=1, EXCHANGE=2, mutually exclusive; zero permits replacement. Atomic visibility is required; unsupported exchange fails. Cross-filesystem rename fails CROSS_DEVICE. UNLINK flags DIRECTORY=1; zero unlinks a non-directory. Native unlink never clunks an unrelated open fid. Open-unlinked regular files remain accessible until references close, subject to backend support.
+- **Rename/unlink/remove:** RENAME flags NOREPLACE=1, EXCHANGE=2, mutually exclusive; zero permits replacement. Atomic visibility is required; unsupported exchange fails. Cross-filesystem rename fails CROSS_DEVICE. UNLINK flags DIRECTORY=1; zero unlinks a non-directory. Native unlink never clunks an unrelated open fid. REMOVE acts on the object's own fid, matching 9P2000 `Tremove`: it unlinks that object without clunking the fid. Open-unlinked regular files remain accessible until references close, subject to backend support.
 - **Xattrs:** action GET=0, SET=1, LIST=2, REMOVE=3. SET flags CREATE_ONLY=1, REPLACE_ONLY=2, mutually exclusive. LIST returns an array of names, not NUL packing. GET/LIST with max_bytes=0 performs a size query; `required_bytes` counts the encoded value blob or names array respectively. Too-small nonzero budgets return TOO_LARGE with required size (details TLV type 3, `required_bytes:u32`). Unused request/response fields are empty/zero. Large streaming xattrs are a future revision; never silently truncate. Security/trusted namespaces require separate authorization.
 - **ACLs:** ACL_POSIX revision 1 uses xattr names `system.posix_acl_access` and `system.posix_acl_default`, with a protocol-owned value: `version:u16=1 count:u32 entries[count]`, each entry `tag:u8 permissions:u8 principal:Principal`. Tags USER_OBJ=1, USER=2, GROUP_OBJ=3, GROUP=4, MASK=5, OTHER=6; permissions READ=4, WRITE=2, EXECUTE=1. Non-named entries have empty principals. Validate uniqueness and required entries; default ACLs apply only to directories. The final specification must pin chmod/mask and inheritance rules with conformance fixtures. Do not label this NFSv4 or Windows ACL support; those require a different module with explicit translation-loss reporting.
 - **Locks:** action TEST=0, TRY=1, UNLOCK=2; kind READ=1, WRITE=2. Locks are advisory byte-range locks, owned by `(session, owner)`, not an untrusted PID or hostname. A failed TRY returns success with granted=0 and a conflict if disclosable. Ranges use checked addition; zero length means through future EOF. Splits/merges and read-to-write replacement are atomic. For UNLOCK, kind=0. No blocking lock queue in revision 1: clients back off and retry. Clunk does not implicitly release owner locks; clients explicitly unlock, and session expiry releases all. POSIX clients must translate close/fork/dup semantics into these owner operations; flock uses a distinct owner or an explicitly documented interoperability policy. Mandatory locking is unsupported.
-- **Cancellation:** disposition NOT_STARTED=0, FINISHED=1, MAY_HAVE_EFFECT=2, NOT_FOUND=3. A CANCEL reply comes only after the target's terminal reply has been serialized (if the target was admitted). No later target response follows it. Cancelling a write does not roll it back. Cancellation of CANCEL is invalid; preserve reserved control capacity. The client keeps the target tag live until its terminal response or terminal connection failure.
+- **Cancellation:** disposition NOT_STARTED=0, FINISHED=1, MAY_HAVE_EFFECT=2, NOT_FOUND=3. A CANCEL reply comes only after the target's terminal reply has been serialized (if the target was admitted). No later target response follows it. Because requests may be transmitted out of order, a CANCEL can arrive before its target; the server records a cancellation tombstone for the unseen sequence and suppresses the target when it arrives, deferring the CANCEL reply until the target's disposition is known (or a bounded tombstone expiry yields NOT_FOUND). Cancelling a write does not roll it back. Cancellation of CANCEL is invalid; preserve reserved control capacity. The client keeps the target fid live until its terminal response or terminal connection failure.
 - **SPACE/COPY:** SPACE actions ALLOCATE_KEEP_SIZE=0, PUNCH_HOLE_KEEP_SIZE=1, SEEK_DATA=2, SEEK_HOLE=3; length=0 for seeks. Allocation and punching return offset=0. COPY flags=0 in revision 1; it may return partial progress. Reject overlapping same-object ranges. Neither operation implies snapshots or durable completion. Missing backend support is explicit; clients may choose their own fallback.
 - **Auth files:** AUTH creates a negotiated-method fid; READ/WRITE exchange method-defined bounded records. ATTACH uses authfid=0 for transport identity, or a completed auth fid otherwise. AUTHFILE methods must bind their result to this secure session/export; never accept credentials on an unencrypted network connection.
 
-Factotum is Plan 9's secret-custody agent: a per-user process that holds the user's keys, passwords, and certificates and performs authentication on behalf of other programs, none of which ever sees the secret material. It presents a file interface mounted at `/mnt/factotum` (`ctl`, `needkey`, `proto`, `log`); a program that must authenticate asks factotum to run the appropriate protocol, and factotum returns only the resulting proof. It reaches 9P through the auth-file flow: factotum opens the connection, issues `Tauth` with an auth fid, exchanges the protocol messages over that fid, and the authenticated fid is carried into `Tattach` by the requesting program. Factotum is therefore the client-side driver of a mechanism 9P already defines — the wire protocol owns the fid exchange, factotum owns the secret.
+Factotum is Plan 9's secret-custody agent: a per-user process that holds the user's keys, passwords, and certificates and performs authentication on behalf of other programs, none of which ever sees the secret material. It presents a file interface mounted at `/mnt/factotum` (`ctl`, `needkey`, `proto`, `log`); a program that must authenticate asks factotum to run the appropriate protocol, and factotum returns only the resulting proof. It reaches 9P through the auth-file flow: factotum opens the connection, issues `Tauth` with an auth fid, exchanges the protocol messages over that fid, and the authenticated fid is carried into `Tattach` by the requesting program. Factotum is therefore the client-side driver of a mechanism 9P already defines: the wire protocol owns the fid exchange, factotum owns the secret.
 
-9Pfrank keeps that mechanism (`AUTH`/`ATTACH`/`authfid`) method-agnostic — `method:text` and method-defined bounded records — so a factotum-like agent drives it unchanged. On modern multi-user Unix the same custody role is filled by ssh-agent, gpg-agent, Kerberos credential caches, and OS keyrings; these differ from factotum in interface (a socket or D-Bus endpoint rather than a 9P-mounted file tree) but not in function, and any of them can drive the AUTH fid on the client's behalf. The transport default, `authfid=0`, is the TLS 1.3 client certificate (§9.1); `AUTHFILE` is the hook for methods a certificate cannot carry. Factotum-style secret custody is thus a client-side deployment component, not a wire-protocol feature: 9Pfrank specifies the fid-based auth exchange, not the local agent that performs it.
+9Pfrank keeps that mechanism (`AUTH`/`ATTACH`/`authfid`) method-agnostic (`method:text` and method-defined bounded records), so a factotum-like agent drives it unchanged. On modern multi-user Unix the same custody role is filled by ssh-agent, gpg-agent, Kerberos credential caches, and OS keyrings; these differ from factotum in interface (a socket or D-Bus endpoint rather than a 9P-mounted file tree) but not in function, and any of them can drive the AUTH fid on the client's behalf. The transport default, `authfid=0`, is the TLS 1.3 client certificate (§9.1); `AUTHFILE` is the hook for methods a certificate cannot carry. Factotum-style secret custody is thus a client-side deployment component, not a wire-protocol feature: 9Pfrank specifies the fid-based auth exchange, not the local agent that performs it.
 
-The client ships optional shims — support code that translates an existing source's interface into a bounded `AUTH` method — which drive the auth fid. Shims occupy two client-side slots and one server-side slot:
+The client ships optional shims (support code that translates an existing source's interface into a bounded `AUTH` method) which drive the auth fid. Shims occupy two client-side slots and one server-side slot:
 
 **Secret-custody agents (factotum's slot)** hold secrets and produce proofs, revealing no key material:
 
-- **ssh-agent** (`SSH_AUTH_SOCK`) — SSH key signatures over the session challenge.
-- **gpg-agent** — OpenPGP/SSH keys and smartcards via its Assuan protocol.
-- **Kerberos credential caches** — KCM and FILE/DIR ccache; obtains a service ticket for the export's principal.
-- **D-Bus Secret Service** — GNOME Keyring and KDE Wallet backends.
-- **macOS Keychain** — SecItem API.
-- **Windows Credential Manager / CNG** — DPAPI-protected credentials and keys.
-- **PKCS#11 tokens** — smartcards, YubiKey, HSMs, SoftHSM.
-- **TPM 2.0** — hardware-protected keys (optional; platform attestation is a separate path).
-- **native factotum** — a separate adapter for Plan 9/9front hosts, outside the core profile.
+- **ssh-agent** (`SSH_AUTH_SOCK`): SSH key signatures over the session challenge.
+- **gpg-agent**: OpenPGP/SSH keys and smartcards via its Assuan protocol.
+- **Kerberos credential caches**: KCM and FILE/DIR ccache; obtains a service ticket for the export's principal.
+- **D-Bus Secret Service**: GNOME Keyring and KDE Wallet backends.
+- **macOS Keychain**: SecItem API.
+- **Windows Credential Manager / CNG**: DPAPI-protected credentials and keys.
+- **PKCS#11 tokens**: smartcards, YubiKey, HSMs, SoftHSM.
+- **TPM 2.0**: hardware-protected keys (optional; platform attestation is a separate path).
+- **native factotum**: the Plan 9/9front path is a transport adapter, not an AUTH-method shim. 9front runs dp9ik pre-auth (`auth_proxy` with `proto=p9any`) over the plain connection, then keys TLS with the resulting secret as a PSK (`pskID = "p9secret"`). Its libsec does not speak TLS 1.3 client certificates, and LibreSSL on OpenBSD lacks the PSK cipher suites (the `openssl11` package is required).
 
 **Auth methods (not custody)** run a flow that yields a proof, independent of where any secret lives:
 
-- **OIDC/OAuth2** — browser/device flow against any IdP, including social sign-on (Google, GitHub, Apple, and similar), binding the returned token to this session.
-- **TOTP** — RFC 6238 one-time codes; the shared secret is sourced from a custody agent or a hardware OATH token, and the server verifies the code.
+- **OIDC/OAuth2**: browser/device flow against any IdP, including social sign-on (Google, GitHub, Apple, and similar), binding the returned token to this session.
+- **TOTP**: RFC 6238 one-time codes; the shared secret is sourced from a custody agent or a hardware OATH token, and the server verifies the code.
 
 **Server-side verifiers**: each shimmed method is verified by its native backend (authorized_keys, a KDC, an IdP token endpoint, or a TOTP verifier), and **PAM** is shimmed as a general verifier behind an export.
 
@@ -408,14 +415,14 @@ Retained sessions keep fids, open state, locks, and a replay table:
 ReplayRecord {                  # server memory model, not additional wire data
     session:          id128;
     sequence:         u64;
-    request_digest:   byte[32];  # SHA-256(opcode || exact request body)
+    request_digest:   byte[16];  # fast 128-bit hash(opcode || exact request body)
     state:            enum { RUNNING, COMPLETE, UNKNOWN };
     encoded_result:   byte[];
     reserved_bytes:   u64;
 }
 ```
 
-Before executing an operation, reserve a replay slot and enough bounded reply storage. Cache all completed replies, including consuming reads and errors, until acknowledged or session expiry. Same sequence plus same body returns the retained result or joins the in-progress operation. Same sequence with different bytes is a protocol violation. Authentication and session identity are part of the table key; a digest is not an authenticator.
+Before executing an operation, reserve a replay slot and enough bounded reply storage. Retain the replies of every operation whose `effect` is not NONE, including consuming reads and errors, until acknowledged or session expiry; a server MAY instead re-execute an operation whose effect is NONE (a pure read) on replay rather than retaining its reply, which keeps bulk regular-file reads out of `replay_bytes`. Same sequence plus same body returns the retained result or joins the in-progress operation. Same sequence with different bytes is a protocol violation. Authentication and session identity are part of the table key; a digest is not an authenticator, so a fast 128-bit hash (not SHA-256) suffices.
 
 ACK means the client has received and will never replay every ordinary sequence at or below `through_sequence`; sequence gaps count as intentionally abandoned. Never acknowledge past an unresolved operation. ACK is idempotent control traffic, consumes its own sequence but no retained replay slot, and must not cause an acknowledgment loop. The server keeps a compact acknowledged floor and rejects requests below it with REPLAY_EXPIRED. Exhausted unacknowledged capacity produces RESOURCE_LIMIT before execution; do not evict entries and later rerun mutations. Session expiry discards the entire session and makes resumption fail.
 
@@ -453,7 +460,8 @@ A strict-cache claim requires a complete lease state machine, model tests for ra
 | Deployment | Recommendation | Cost and limitations |
 | --- | --- | --- |
 | Native clients and servers | TLS 1.3 over persistent TCP as the initial default | Broad library support; one ordered byte stream has head-of-line blocking under packet loss |
-| Managed fleet or existing VPN | TCP inside WireGuard, restricted to the tunnel | Efficient host-level encryption; peer identity still needs an explicit user/export mapping || Existing legacy clients | WireGuard or a supervised authenticated TLS/SSH tunnel | Requires no legacy protocol change; gateway copies, lifecycle, and identity delegation need care |
+| Managed fleet or existing VPN | TCP inside WireGuard, restricted to the tunnel | Efficient host-level encryption; peer identity still needs an explicit user/export mapping |
+| Existing legacy clients | WireGuard or a supervised authenticated TLS/SSH tunnel | Requires no legacy protocol change; gateway copies, lifecycle, and identity delegation need care |
 | Local same-host connection | Unix socket with peer credentials and OS access controls | Avoids unnecessary network cryptography; does not cover another host or an untrusted VM boundary |
 
 TLS 1.3 provides authenticated encryption, modern key establishment, resumption, and key updates. Disable TLS early data for all 9P application traffic: replayed “reads” can consume synthetic streams, and mount/auth actions can create state. Verify server identity and use client certificates or an explicitly authenticated application method. The recommended TLS profile supports TLS_AES_128_GCM_SHA256 and TLS_CHACHA20_POLY1305_SHA256; prefer based on actual endpoint acceleration and measurement. Never design new ciphers or disable integrity for speed. [TLS 1.3, RFC 8446](https://www.rfc-editor.org/rfc/rfc8446)
@@ -462,7 +470,7 @@ WireGuard uses a defined authenticated key exchange and ChaCha20-Poly1305. It is
 
 Choose one encryption boundary deliberately. TLS inside WireGuard can be appropriate for end-to-end process authentication or different administrative boundaries, but adds processing and packet overhead. Benchmark that choice. A tunnel terminating on a gateway protects only as far as that gateway unless the backend leg is also secured.
 
-Never downgrade to plaintext. `9Pfrank` is a proposed ALPN identifier; check registration requirements before publication. Use configurable ports until service registration is settled.
+Never downgrade to plaintext; a legacy 9P2000 client is served only through an authenticated tunnel or a local Unix socket, never plaintext on an exposed TCP port. `9Pfrank` is a proposed ALPN identifier; check registration requirements before publication. Use configurable ports until service registration is settled.
 
 ### 9.2 Mount security policy
 
@@ -499,7 +507,7 @@ max_inflight = 128
 max_inflight_bytes = 33554432
 ```
 
-A legacy `.L` mount inside WireGuard is a migration bridge, not proof of 2026 support. Document and test an OS-specific recipe once the server, identity model, firewall, and client implementation are selected; a generic mount command cannot establish those prerequisites.
+A legacy `.L` mount inside WireGuard is a migration bridge, not proof of 9Pfrank support. Document and test an OS-specific recipe once the server, identity model, firewall, and client implementation are selected; a generic mount command cannot establish those prerequisites.
 
 ### 9.3 Where performance will actually come from
 
@@ -536,64 +544,64 @@ Estimate cost as measured CPU-seconds/GiB × projected volume plus peak required
 
 ## 10. Delivery plan
 
-### Phase A — evidence and semantic inventory
+### Phase A: evidence and semantic inventory
 
-Produce pinned source references and wire fixtures for 9P2000, `.u`, `.L`, and each identified `.e` lineage. Inventory every legacy operation, flag, error, object type, and edge case in a coverage matrix. Add tests for old auth/stat encodings, numeric identity preference, partial walks, and remove/clunk semantics. Resolve `.e` provenance before claiming its complete compatibility. Review Plan 9 synthetic resource workloads, not only POSIX files.
+Produce pinned source references and wire fixtures for 9P2000, `.u`, `.L`, and each identified `.e` lineage. Inventory every legacy operation, flag, error, object type, and edge case in a coverage matrix. Add tests for old auth/stat encodings, numeric identity preference, partial walks, remove/clunk semantics, and the canonical 9P2000 error strings (Plan 9 programs match strings, e.g. NOT_FOUND to "file does not exist"). Resolve `.e` provenance before claiming its complete compatibility. Review Plan 9 synthetic resource workloads, not only POSIX files.
 
 Deliverables: `spec/legacy-coverage.md`, `spec/sources.lock`, captured/constructed golden packets, and explicit unsupported-backend cases.
 
-### Phase B — freeze the core draft and codecs
+### Phase B: freeze the core draft and codecs
 
-Turn this plan into a normative grammar/IDL plus registries and a state-machine specification. Resolve all per-op invalid combinations, errno mappings, ACL rules, negotiated maxima, and frame-size formulas. Generate codecs or cross-check two handwritten codecs. Publish endian, signed-time, Unicode/name-byte, overflow, and error fixtures. Fuzz malformed/truncated frames, TLVs, count/length contradictions, duplicate tags, and fid reuse.
+Turn this plan into a normative grammar/IDL plus registries and a state-machine specification. Resolve all per-op invalid combinations, errno mappings, ACL rules, negotiated maxima, and frame-size formulas. Generate codecs or cross-check two handwritten codecs. Publish endian, signed-time, Unicode/name-byte, overflow, and error fixtures. Fuzz malformed/truncated frames, TLVs, count/length contradictions, sequence reuse, and fid reuse.
 
 Gate: two independent codecs agree byte-for-byte, malformed inputs remain within bounded memory/CPU, and every draft field has defined validity and failure behavior.
 
-### Phase C — useful secure prototype
+### Phase C: useful secure prototype
 
-Implement a userspace server and mount client with CORE, POSIX, TLS/TCP, and a local Unix-socket transport. Add legacy `.L` and `.u` frontends to the same backend API without merging codecs. Use explicit identity mapping and export confinement. Default to uncached operation. Add synthetic echo/control/event resources alongside ordinary files. Ship a working skeleton passthrough client and server — the pair the cookbook's examples run against — with a fun example server that serves every file reversed. Provide the server as a reusable library, with a cookbook documenting how to adapt it into a frontend to anything.
+Implement a userspace server and mount client with CORE, POSIX, TLS/TCP, and a local Unix-socket transport. Add legacy `.L` and `.u` frontends to the same backend API without merging codecs. Use explicit identity mapping and export confinement. Default to uncached operation. Add synthetic echo/control/event resources alongside ordinary files. Ship a working skeleton passthrough client and server (the pair the cookbook's examples run against) with a fun example server that serves every file reversed. Provide the server as a reusable library, with a cookbook documenting how to adapt it into a frontend to anything.
 
 Gate: mount/read/write/create/link/rename/unlink, cross-user denial, symlink escape resistance, special-file policy, explicit durability, and cancellation work under concurrency. Publish the actual supported OS/client combinations and installation recipes.
 
-### Phase D — round-trip and backend features
+### Phase D: round-trip and backend features
 
-Implement COMPOUND, readdir attributes, xattrs, ACL_POSIX, locking, sparse-file operations, and copy. Validate partial outcomes and backend limitations. Benchmark against equivalent `.L` and native 2026 workloads with encryption held constant.
+Implement COMPOUND, readdir attributes, xattrs, ACL_POSIX, locking, sparse-file operations, and copy. Validate partial outcomes and backend limitations. Benchmark against equivalent `.L` and native 9Pfrank workloads with encryption held constant.
 
 Gate: compounds improve intended workloads without unbounded buffering; lock adapters pass fork/close/dup tests; append and rename guarantees survive contention.
 
-### Phase E — retained sessions and recovery
+### Phase E: retained sessions and recovery
 
 Implement replay reservations, acknowledgment floors, fencing, retention quotas, and reconnect. Inject disconnects before admission, during backend work, after side effect, before reply, and during resume. Include consuming synthetic reads and writes. Kill the server and verify clients report uncertainty instead of inventing exactly-once behavior.
 
 Gate: no duplicated operation in a successfully retained session, no replay of acknowledged/expired mutations, no cross-principal resume, and no old-epoch operation admitted after fencing.
 
-### Phase F — optional coherency
+### Phase F: optional coherency
 
 Specify and model read leases before implementation. Verify interactions with local backend writers, notification overflow, suspend, time drift, session expiry, and authorization changes.
 
-Gate: either demonstrate the cache benefit with correctness evidence, or keep the module optional and disabled. A useful 2026 release does not depend on writable leases, distributed transactions, or transparent failover.
+Gate: either demonstrate the cache benefit with correctness evidence, or keep the module optional and disabled. A useful 9Pfrank release does not depend on writable leases, distributed transactions, or transparent failover.
 
-### Phase G — interoperability and release
+### Phase G: interoperability and release
 
-Run two independent client/server combinations, legacy regression suites, property/fuzz tests, and network/crash fault injection. Publish packet diagrams, a dissector, threat model, compatibility matrix, benchmark scripts/results, and administrator documentation. Ship the spec; a cookbook of fun, worked examples on Linux, OpenBSD, and Windows; the linkable library; complete FFI shims (one `bindings/` subdirectory per language, a binding matrix, and an FFI docs page with the API reference table, C quick start, architecture diagram, and build instructions); the server, client, and a FUSE mount driver for the client; and full documentation — manpages, GNU info, markdown, `README.distributions` with `dist/` packaging templates, an `UNBOXING` quick start, and a `CHANGES` log — in a full GNU autotools layout following GNU standards. Obtain opcode/feature/ALPN/service registration where applicable. Freeze revision 1 only after review of recovery and authorization by people outside the implementation team.
+Run two independent client/server combinations, legacy regression suites, property/fuzz tests, and network/crash fault injection. Publish packet diagrams, a dissector, threat model, compatibility matrix, benchmark scripts/results, and administrator documentation. Ship the spec; a cookbook of fun, worked examples on Linux, OpenBSD, and Windows; the linkable library; complete FFI shims (one `bindings/` subdirectory per language, a binding matrix, and an FFI docs page with the API reference table, C quick start, architecture diagram, and build instructions); the server, client, and a FUSE mount driver for the client; and full documentation (manpages, GNU info, markdown, `README.distributions` with `dist/` packaging templates, an `UNBOXING` quick start, and a `CHANGES` log) in a full GNU autotools layout following GNU standards. Obtain opcode/feature/ALPN/service registration where applicable. Freeze revision 1 only after review of recovery and authorization by people outside the implementation team.
 
-### Cookbook — worked example projects
+### Cookbook: worked example projects
 
 The cookbook ships these twelve projects in ascending difficulty, each small enough for a junior coder and each adding one new idea on top of the last:
 
-1. **Hello, 9Pfrank** — mount one synthetic `/hello` file that reads a fixed string.
-2. **The Clock** — `/time` and `/uptime`, computed on every read; nothing is stored.
-3. **Backwards File System** — a passthrough that serves a directory with every file's bytes reversed.
-4. **Fortune Cookie** — `/fortune` returns a random line from a quote file on each open.
-5. **System Dashboard** — a `/proc`-style mount exposing memory, load, and CPU as synthetic files.
-6. **TODO Directory** — one file per todo item; create/remove/write to manage the list.
-7. **Guestbook** — write a file to post a timestamped message; read `/log` to view them.
-8. **Remote Clipboard** — `/clipboard` as a read/write file mirroring the host clipboard.
-9. **Magic Calculator** — write an expression to `/calc` and read the answer, or a `/primes/<n>` tree.
-10. **SQLite/API as a Filesystem** — a database table or a REST endpoint served as a directory of files.
-11. **FUSE Mount Driver** — a `libfuse3` backend that maps a mounted 9Pfrank server's namespace into the local kernel VFS, so a remote tree appears under an ordinary directory.
-12. **The Time Capsule** — the grand finale: a server whose files live in a raw Unix V6/V7 disk image, read through the filsys library — directories, inodes, and data blocks served as a living namespace.
+1. **Hello, 9Pfrank**: mount one synthetic `/hello` file that reads a fixed string.
+2. **The Clock**: `/time` and `/uptime`, computed on every read; nothing is stored.
+3. **Backwards File System**: a passthrough that serves a directory with every file's bytes reversed.
+4. **Fortune Cookie**: `/fortune` returns a random line from a quote file on each open.
+5. **System Dashboard**: a `/proc`-style mount exposing memory, load, and CPU as synthetic files.
+6. **TODO Directory**: one file per todo item; create/remove/write to manage the list.
+7. **Guestbook**: write a file to post a timestamped message; read `/log` to view them.
+8. **Remote Clipboard**: `/clipboard` as a read/write file mirroring the host clipboard.
+9. **Magic Calculator**: write an expression to `/calc` and read the answer, or a `/primes/<n>` tree.
+10. **SQLite/API as a Filesystem**: a database table or a REST endpoint served as a directory of files.
+11. **FUSE Mount Driver**: a `libfuse3` backend that maps a mounted 9Pfrank server's namespace into the local kernel VFS, so a remote tree appears under an ordinary directory.
+12. **The Time Capsule**: the grand finale, a server whose files live in a raw Unix V6/V7 disk image, read through the filsys library (directories, inodes, and data blocks served as a living namespace).
 
-These twelve projects are the `examples/` directory; each ships in C against the library and in idiomatic newLISP through the newLISP FFI binding.
+These twelve projects are the `examples/` directory; each ships in C against the library and in idiomatic newLISP through the newLISP FFI binding. Because newLISP is single-threaded, the library must expose a caller-owned, poll-driven (non-blocking, no internal threads) event-loop mode so the binding delivers callbacks on the interpreter thread.
 
 ## 11. Decisions deliberately left for review
 
@@ -605,16 +613,15 @@ The initial choices are TLS/TCP, new framing after the legacy bootstrap, portabl
 4. Finalize registered names/numbers, malformed-frame behavior, resource-limit ceilings, and the IDL. The concrete layouts above are reviewable proposals, not allocated standard values.
 5. Prove lease expiry and recall rules before enabling coherent caching. Durable replay across restart, distributed locks/failover, snapshots, write delegations, transactions, arbitrary ioctl forwarding, and remote socket operations are outside revision 1.
 6. Choose supported mount implementations and deployment platforms after the prototype; do not publish fictional native-kernel support or unmeasured encryption overhead.
+7. Decide whether a version string that participates in version(5)'s digit-suffix negotiation (for example `9P2000.F`) is worth same-connection fallback to 9P2000; it is rejected for now to keep the dialect name `9Pfrank`.
 
 The intended result is a small usable core with explicit extension contracts: traditional 9P namespace flexibility, the practical filesystem coverage of its Unix/Linux descendants, fewer round trips, and security that can be deployed and measured on ordinary machines.
 
 ## 12. Platform support appendix
 
-This appendix records which platforms the protocol targets and what each can actually back. It is a planning matrix, not a conformance claim: a platform is "supported" only where the backend semantics required by the claimed profile are present and fixture-tested. Cells marked "verify" are research items, not established facts. Target set: Linux, illumos, and the BSD family (FreeBSD, NetBSD, OpenBSD, DragonFly BSD).
-
 ### 12.1 Conformance vs. backend coverage
 
-A platform's support is determined by which of the protocol's operations its backend can implement (§5.2, §4.3). A platform lacking xattrs or POSIX.1e ACLs is a reduced-profile platform, not an unsupported one: it advertises a smaller profile and reports backend limitations explicitly (§1). The "full filesystem" profile (features 1..7, 9..13, §4.2) is fully realizable only where xattrs, POSIX.1e ACLs, SEEK_HOLE, and fcntl byte-range locks coexist — Linux, and FreeBSD with the ZFS/ACL caveats below. Everywhere else the server advertises a reduced profile.
+A platform's support is determined by which of the protocol's operations its backend can implement (§5.2, §4.3). A platform lacking xattrs or POSIX.1e ACLs is a reduced-profile platform, not an unsupported one: it advertises a smaller profile and reports backend limitations explicitly (§1). The "full filesystem" profile (features 1..7, 9..13, §4.2) is fully realizable only where xattrs, POSIX.1e ACLs, SEEK_HOLE, and fcntl byte-range locks coexist: Linux, and FreeBSD with the ZFS/ACL caveats below. Everywhere else the server advertises a reduced profile.
 
 ### 12.2 Backend semantics matrix
 
@@ -640,19 +647,19 @@ Values: **full** (native, matches §5.2), **partial** (different API or filesyst
 5. Linux: `SO_PEERCRED` on Unix sockets.
 6. illumos: `getpeerucred(3C)`.
 7. the BSDs: `getpeereid(3)`.
-8. illumos has no base FUSE; a third-party port exists — verify.
+8. illumos has no base FUSE; a third-party port exists (verify).
 9. NetBSD: perfused / librefuse.
 
-The peer-credential row is a code-level portability issue, not merely a semantic one: §9.1's "Unix socket with peer credentials" needs a backend interface exposing `SO_PEERCRED` (Linux) / `getpeerucred(3C)` (illumos) / `getpeereid(3)` (the BSDs) behind one call.
+The peer-credential row is a code-level portability issue, not merely a semantic one: §9.1's "Unix socket with peer credentials" needs a backend interface exposing `SO_PEERCRED` (Linux) / `getpeerucred(3C)` (illumos) / `getpeereid(3)` (the BSDs) behind one call. The same applies to the xattr APIs (`getxattr`, `extattr`, `attropen`/`openat(O_XATTR)`): each variant lives in a per-platform `.c` file selected by configure, never behind `#ifdef` in shared code.
 
 ### 12.3 Platform notes
 
-- **Linux** — every feature ID in the full-filesystem profile is native; FUSE via libfuse3; peer creds via `SO_PEERCRED`.
-- **illumos** — home of SEEK_HOLE/SEEK_DATA and ZFS, but the xattr and ACL models differ (`attropen` / `openat(O_XATTR)`, NFSv4 ACLs) and POSIX.1e ACLs are absent. Reduced profile.
-- **FreeBSD** — `extattr` (user/system namespaces) replaces Linux's `getxattr`; POSIX.1e ACLs on UFS and NFSv4 on ZFS; SEEK_HOLE only on ZFS. `fusefs-libs3` for the mount client.
-- **NetBSD** — extended attributes and POSIX.1e ACLs present; no SEEK_HOLE/DATA; perfuse/librefuse for FUSE.
-- **OpenBSD** — no xattrs, no POSIX.1e ACLs, no SEEK_HOLE; a reduced core profile only.
-- **DragonFly BSD** — HAMMER2 coverage of ACLs and SEEK_HOLE unverified.
+- **Linux**: every feature ID in the full-filesystem profile is native; FUSE via libfuse3; peer creds via `SO_PEERCRED`.
+- **illumos**: home of SEEK_HOLE/SEEK_DATA and ZFS, but the xattr and ACL models differ (`attropen` / `openat(O_XATTR)`, NFSv4 ACLs) and POSIX.1e ACLs are absent. Reduced profile.
+- **FreeBSD**: `extattr` (user/system namespaces) replaces Linux's `getxattr`; POSIX.1e ACLs on UFS and NFSv4 on ZFS; SEEK_HOLE only on ZFS. `fusefs-libs3` for the mount client.
+- **NetBSD**: extended attributes and POSIX.1e ACLs present; no SEEK_HOLE/DATA; perfuse/librefuse for FUSE.
+- **OpenBSD**: no xattrs, no POSIX.1e ACLs, no SEEK_HOLE; a reduced core profile only.
+- **DragonFly BSD**: HAMMER2 coverage of ACLs and SEEK_HOLE unverified.
 
 ### 12.4 Verification and fixtures
 
