@@ -455,6 +455,8 @@ A strict-cache claim requires a complete lease state machine, model tests for ra
 
 ## 9. Secure network mounts with reasonable latency and cost
 
+Security is made easy and transparent, not forced. Secure transports are the default and need little configuration; the operator can see what is and is not encrypted; and plaintext or a legacy dialect is always a deliberate choice.
+
 ### 9.1 Transport choices
 
 | Deployment | Recommendation | Cost and limitations |
