@@ -1,12 +1,12 @@
 # 9Pfrank
 
-A proposed semantic superset of the 9P family. 9Pfrank is the superset dialect; 9P2000, 9P2000.u, 9P2000.L, and 9P.original are supported behind separate frontends, and 9P2000.e compatibility is partial.
+A proposed semantic superset of the 9P family. 9Pfrank is the superset dialect; 9P2000, 9P2000.u, 9P2000.L, 9P2000.e, and 9P.original are supported behind separate frontends.
 
 **Status:** proposed design, revision 0.1. A design plan, not an existing standard.
 
 ## What it is
 
-9Pfrank preserves 9P's central model: attach to a namespace, obtain fids, walk names, read and write resources, and release references. It treats synthetic files and services as first-class resources. It adds one new dialect with explicit capability negotiation, while keeping legacy dialects behind separate frontends: each frontend maps its dialect's wire format onto 9Pfrank's unified operation set, so supporting the earlier protocols is a bounded, mechanical translation. By default a 9Pfrank server accepts 9P2000, 9P2000.u, and 9P2000.L clients (9P2000.e under review), but only over an authenticated tunnel or a local socket, never in plaintext on an exposed TCP port.
+9Pfrank preserves 9P's central model: attach to a namespace, obtain fids, walk names, read and write resources, and release references. It treats synthetic files and services as first-class resources. It adds one new dialect with explicit capability negotiation, while keeping legacy dialects behind separate frontends: each frontend maps its dialect's wire format onto 9Pfrank's unified operation set, so supporting the earlier protocols is a bounded, mechanical translation. By default a 9Pfrank server accepts 9P2000, 9P2000.u, 9P2000.L, 9P2000.e, and 9P.original clients, but only over an authenticated tunnel or a local socket, never in plaintext on an exposed TCP port.
 
 Key properties:
 
