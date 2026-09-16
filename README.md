@@ -1,6 +1,6 @@
 # 9Pfrank
 
-A proposed semantic superset of the 9P family. 9Pfrank is the superset dialect; 9P2000, 9P2000.u, and 9P2000.L are supported behind separate frontends, and 9P2000.e compatibility is partial. Original 9P (editions 1–3) is out of scope.
+A proposed semantic superset of the 9P family. 9Pfrank is the superset dialect; 9P2000, 9P2000.u, 9P2000.L, and 9P.original are supported behind separate frontends, and 9P2000.e compatibility is partial.
 
 **Status:** proposed design, revision 0.1. A design plan, not an existing standard.
 
