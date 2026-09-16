@@ -41,7 +41,7 @@ Its session restoration uses an unauthenticated 8-byte session key in `Tsession`
 
 ## 3. Compatibility and connection startup
 
-1. Native 9Pfrank traffic establishes the configured authenticated transport **before** any 9P bytes; there is no plaintext STARTTLS phase, and the native listener expects a TLS ClientHello. Legacy codecs speak their dialect as it is, including plaintext; exposing plain 9P2000 or 9P.original on an untrusted network is a deployment policy (default off), not a protocol rule. Codec paths carry raw bytes before any TLS, so they need their own port or a first-bytes sniff.
+1. Native 9Pfrank traffic establishes the configured authenticated transport **before** any 9P bytes; there is no plaintext STARTTLS phase, and the native listener expects a TLS ClientHello. Legacy codecs speak their dialect as it is, including plaintext, which is a debug mode, not a production mode. Codec paths carry raw bytes before any TLS, so they need their own port or a first-bytes sniff.
 2. Byte 0 selects the path first: `Tnop` or `Tsession` dispatches to the original-9P codec immediately. Otherwise read 13 bytes and require a self-consistent `Tversion` (type 100 at offset 4, `size` equal to 13 plus the version-string length); anything else is dropped. The checks do not collide: a `Tversion`'s byte 0 is the low byte of its size, which equals `Tnop` or `Tsession` only for version strings whose length is 37 or 71 modulo 256, lengths no accepted dialect uses. On the version path, the server matches the client's `version` string exactly to select a codec: `9P2000`, `9P2000.u`, `9P2000.L`, and `9P2000.e` select their legacy codecs; `9Pfrank` selects the native codec. Any other version string is handled per version(5): strip a `.suffix`, require `9P` followed by digits; if the digits are at least 2000, reply `9P2000`, otherwise reply `unknown`.
 3. A native client sends `version="9Pfrank"`, tag `0xffff`, and a proposed maximum message size. Any reply other than exactly `9Pfrank` means the server does not speak the native dialect, so in-place downgrade to 9P2000 is impossible; a native client that must fall back to a legacy dialect opens a fresh connection and sends that dialect's own version string.
 4. An exact `9Pfrank` reply switches both directions to the native header immediately after that reply. Then exchange HELLO; no attach or filesystem operation is legal before HELLO completes.
@@ -473,7 +473,7 @@ WireGuard uses a defined authenticated key exchange and ChaCha20-Poly1305. It is
 
 Choose one encryption boundary deliberately. TLS inside WireGuard can be appropriate for end-to-end process authentication or different administrative boundaries, but adds processing and packet overhead. Benchmark that choice. A tunnel terminating on a gateway protects only as far as that gateway unless the backend leg is also secured.
 
-Native 9Pfrank never downgrades to plaintext. Legacy codecs may, and plain 9P2000 on TCP is a legitimate path; exposing it is a deployment policy that defaults to off. `9Pfrank` is a proposed ALPN identifier; check registration requirements before publication. Use configurable ports until service registration is settled.
+Native 9Pfrank never downgrades to plaintext. Plain 9P2000 on TCP is available as a debug mode, not a production mode. `9Pfrank` is a proposed ALPN identifier; check registration requirements before publication. Use configurable ports until service registration is settled.
 
 ### 9.2 Mount security policy
 
@@ -502,7 +502,7 @@ client_certificate = "/etc/9Pfrank/workstation.pem"
 client_key = "/etc/9Pfrank/workstation.key"
 identity = "alice@example.net"
 allow_legacy = false
-allow_plaintext = false
+allow_plaintext = false  # debug only
 mount_options = ["nodev", "nosuid"]
 cache = "none"
 max_io = 262144
