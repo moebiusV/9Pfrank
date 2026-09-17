@@ -571,16 +571,16 @@ The in-kernel v9fs client speaks 9P2000, `.u`, and `.L` today. Making it a nativ
 
 Produce pinned source references and wire fixtures for 9P2000, `.u`, `.L`, 9P.original, and each identified `.e` lineage. Inventory every legacy operation, flag, error, object type, and edge case in a coverage matrix, including the client-direction gaps per dialect:
 
-| Native operation | 9P2000 / `.u` | 9P2000.L | `.e` |
-| --- | --- | --- | --- |
-| create-time `plan9_flags` | native (`DMEXCL`/`DMAPPEND` in `Tcreate`) | emulate (`CREATE` then `SETATTR`) | native |
-| READ_EXEC (5) | native (`OEXEC`) | refuse | native (`OEXEC`) |
-| EXEC alone (4) | refuse | refuse | refuse |
-| COMPOUND | emulate (sequential, stop at first failure) | emulate | native (macro ops) |
-| CANCEL-by-sequence | emulate (`Tflush` on the tag) | emulate | emulate |
-| REMOVE without clunk | emulate (zero-name walk clone, then `Tremove`) | emulate | emulate |
+| Native operation | 9P2000 / `.u` | 9P2000.L | `.e` | 9P.original |
+| --- | --- | --- | --- | --- |
+| create-time `plan9_flags` | native (`DMEXCL`/`DMAPPEND` in `Tcreate`) | refuse | native | verify (`CHAPPEND`/`CHEXCL`) |
+| READ_EXEC (5) | native (`OEXEC`) | refuse | native (`OEXEC`) | native (`OEXEC`) |
+| EXEC alone (4) | refuse | refuse | refuse | refuse |
+| COMPOUND | emulate (sequential, stop at first failure) | emulate | partial (walk-open-read/write-clunk); else emulate | emulate (sequential) |
+| CANCEL-by-sequence | emulate (`Tflush` on the tag) | emulate | emulate | emulate (`Tflush`) |
+| REMOVE without clunk | emulate (zero-name walk clone, then `Tremove`) | emulate | emulate | emulate (`Tclone` then `Tremove`) |
 
-9P.original expresses none of these; its client codec refuses them all. The emulations preserve client-visible semantics: compounds promise ordering, not atomicity, and the walk clone and `Tflush` reproduce the native outcomes. Add tests for old auth/stat encodings, numeric identity preference, partial walks, remove/clunk semantics, and the canonical 9P2000 error strings (Plan 9 programs match strings, e.g. NOT_FOUND to "file does not exist"). Review Plan 9 synthetic resource workloads, not only POSIX files.
+EXEC alone (4) is the only refusal 9P.original shares with the rest; its `CHAPPEND`/`CHEXCL` create flags are to confirm in Phase A. The emulations preserve client-visible semantics: compounds promise ordering, not atomicity, and the clone and `Tflush` reproduce the native outcomes. Add tests for old auth/stat encodings, numeric identity preference, partial walks, remove/clunk semantics, and the canonical 9P2000 error strings (Plan 9 programs match strings, e.g. NOT_FOUND to "file does not exist"). Review Plan 9 synthetic resource workloads, not only POSIX files.
 
 Deliverables: `spec/legacy-coverage.md`, `spec/sources.lock`, captured/constructed golden packets, and explicit unsupported-backend cases.
 
@@ -594,7 +594,7 @@ Gate: two independent codecs agree byte-for-byte on little- and big-endian, 32- 
 
 Implement a userspace server and mount client with CORE, POSIX, TLS/TCP, plain TCP, and a local Unix-socket transport. Add legacy `.L` and `.u` codecs on the server (same backend API) and on the client (reverse direction), without merging the dialects. Use explicit identity mapping and export confinement. Default to uncached operation. Report each session's dialect, transport, and peer identity. Add synthetic echo/control/event resources alongside ordinary files. Ship a working skeleton passthrough client and server (the pair the cookbook's examples run against) with a fun example server that serves every file reversed. Ship a `9pcon`-style console and a `chatty9p`-style tracer for debugging the wire protocol. Both decode every dialect, native and codec, including 9P.original's self-delimited framing, so the console doubles as the hand-driven harness for Phase A fixtures and Phase G interop. The tracer redacts resume tokens, `.e` `Tsession` keys, the 9P.original auth fields (challenge, ticket, and authenticator), AUTH fid read/write payloads, the PAKE preamble, and `security.*` xattr values, so tracing does not break §7. Provide both the server and the client in the reusable library, with a cookbook documenting how to adapt the server to any backend.
 
-Gate: mount/read/write/create/link/rename/unlink, cross-user denial, symlink escape resistance, special-file policy, explicit durability, cancellation, and per-session dialect/transport/peer-identity reporting work under concurrency. The client codecs run the same operations in fallback against a stock `.L` server (QEMU's 9p server or diod; check diod's maintenance status first). Publish the actual supported OS/client combinations and installation recipes.
+Gate: mount/read/write/create/link/rename/unlink, cross-user denial, symlink escape resistance, special-file policy, explicit durability, cancellation, and per-session dialect/transport/peer-identity reporting work under concurrency. The `.L` client codec runs the same operations in fallback against a stock `.L` server (NFS-Ganesha's 9P frontend over TCP, diod, or hugelgupf/p9; check diod's maintenance status first). The `.u` client codec is exercised in Phase G, once a `.u` server is named. Publish the actual supported OS/client combinations and installation recipes.
 
 ### Phase D: round-trip and backend features
 
