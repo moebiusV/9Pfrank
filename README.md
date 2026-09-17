@@ -2,7 +2,7 @@
 
 A proposed semantic superset of the 9P family. 9Pfrank is the superset dialect; 9P2000, 9P2000.u, 9P2000.L, 9P2000.e, and 9P.original are supported behind separate codecs.
 
-**Status:** proposed design, revision 0.1. A design plan, not an existing standard.
+**Status:** proposed design, revision 0.2. A design plan, not an existing standard.
 
 ## What it is
 

@@ -1,6 +1,6 @@
 # 9Pfrank: protocol design and implementation plan
 
-Status: proposed design, revision 0.1, 2026-09-14. This is a design plan, not an existing standard or a claim of client support. All layouts, numbers, limits, and requirements below are proposed. `MUST` and `SHOULD` describe the intended contract. Freeze the wire format only after two independent implementations interoperate.
+Status: proposed design, revision 0.2, 2026-09-16. This is a design plan, not an existing standard or a claim of client support. All layouts, numbers, limits, and requirements below are proposed. `MUST` and `SHOULD` describe the intended contract. Freeze the wire format only after two independent implementations interoperate.
 
 ## 1. Direction
 
